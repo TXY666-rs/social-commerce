@@ -1,0 +1,57 @@
+# 密钥文件
+.env
+!.env.example
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+eval_report.json
+
+# Java / Maven
+*.class
+*.jar
+*.war
+*.ear
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Node
+node_modules/
+.npm
+*.tgz
+*.tsbuildinfo
+dist/
+
+# ONNX 模型文件
+**/model-cache/
+**/resources/model/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Claude Code
+.claude/
+.workbuddy/

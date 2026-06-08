@@ -1,0 +1,20 @@
+server:
+  port: 8085
+  servlet:
+    context-path: /api
+spring:
+  application:
+    name: user-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 192.168.211.100:8848
+        group: com.social
+      config:
+        server-addr: 192.168.211.100:8848
+        file-extension: yaml
+        group: com.social
+  config:
+    import:
+      - optional:nacos:user-service?group=com.social&refresh=true
+      - optional:nacos:social-common?group=com.social&refresh=true

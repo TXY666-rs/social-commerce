@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: social-common
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 192.168.211.100:8848
+        group: com.social
+      config:
+        server-addr: 192.168.211.100:8848
+        file-extension: yaml
+        group: com.social
+  config:
+    import:
+      - optional:nacos:social-common?group=com.social&refresh=true

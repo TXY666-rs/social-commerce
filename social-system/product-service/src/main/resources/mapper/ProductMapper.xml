@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.social.productservice.mapper.ProductMapper">
+
+    <resultMap id="ProductResultMap" type="com.social.productservice.domain.po.Product">
+        <id column="id" property="id"/>
+        <result column="name" property="name"/>
+        <result column="description" property="description"/>
+        <result column="price" property="price"/>
+        <result column="stock" property="stock"/>
+        <result column="category" property="category"/>
+        <result column="image" property="image"/>
+        <result column="seller_id" property="sellerId"/>
+        <result column="status" property="status"/>
+        <result column="view_count" property="viewCount"/>
+        <result column="is_deleted" property="isDeleted"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_time" property="updateTime"/>
+    </resultMap>
+
+    <select id="selectProductPage" resultMap="ProductResultMap">
+        SELECT * FROM product
+        WHERE is_deleted = 0
+        <if test="status != null">
+            AND status = #{status}
+        </if>
+        <if test="category != null and category != ''">
+            AND #{category} = ANY(string_to_array(category, ','))
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY create_time DESC
+    </select>
+
+    <update id="incrementViewCount">
+        UPDATE product SET view_count = view_count + 1 WHERE id = #{id} AND is_deleted = 0
+    </update>
+
+    <update id="decreaseStock">
+        UPDATE product SET stock = stock - #{quantity} WHERE id = #{id} AND stock >= #{quantity} AND is_deleted = 0
+    </update>
+    <update id="increaseStock">
+        UPDATE product set stock =stock + #{quantity}  where id=#{id} and is_deleted =0
+    </update>
+
+    <select id="selectByCategory" resultMap="ProductResultMap">
+        SELECT * FROM product
+        WHERE is_deleted = 0
+          AND status = 1
+          AND #{category} = ANY(string_to_array(category, ','))
+        ORDER BY create_time DESC
+    </select>
+
+    <select id="selectSellerProductPage" resultMap="ProductResultMap">
+        SELECT * FROM product
+        WHERE is_deleted = 0
+        AND seller_id = #{sellerId}
+        <if test="status != null">
+            AND status = #{status}
+        </if>
+        <if test="category != null and category != ''">
+            AND #{category} = ANY(string_to_array(category, ','))
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (name LIKE CONCAT('%', #{keyword}, '%') OR description LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY create_time DESC
+    </select>
+
+    <select id="selectByScalarQuery" resultType="com.social.productservice.domain.vo.ToAgentProductVO">
+        SELECT p.id, p.name, p.description, p.price, p.stock
+        FROM product p
+        WHERE p.status = #{status}
+          AND p.stock > 0
+          AND p.is_deleted = 0
+        <if test="maxPrice!=null and minPrice!=null">
+            AND p.price BETWEEN #{minPrice} AND #{maxPrice}
+        </if>
+        <if test="maxPrice!=null and minPrice==null">
+            AND p.price &lt; #{maxPrice}
+        </if>
+        <if test="maxPrice==null and minPrice!=null">
+            AND p.price &gt; #{minPrice}
+        </if>
+        <if test="category != null and category != ''">
+            AND p.category = #{category}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND p.name ILIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY p.price
+        LIMIT #{topK}
+    </select>
+</mapper>

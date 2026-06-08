@@ -1,0 +1,33 @@
+server:
+  port: 8089
+  servlet:
+    context-path: /api
+spring:
+  application:
+    name: memory-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 192.168.211.100:8848
+        group: com.social
+      config:
+        server-addr: 192.168.211.100:8848
+        file-extension: yaml
+        group: com.social
+  config:
+    import:
+      - optional:nacos:memory-service?group=com.social&refresh=true
+      - optional:nacos:social-common?group=com.social&refresh=true
+  datasource:
+    driver-class-name: org.postgresql.Driver
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.social.memoryservice.domain.po
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
