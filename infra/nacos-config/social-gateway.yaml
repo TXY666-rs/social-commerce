@@ -11,33 +11,43 @@
 spring:
   cloud:
     gateway:
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOriginPatterns: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
       routes:
-        # 用户服务
         - id: user-service
           uri: lb://user-service
           predicates:
-            - Path=/api/user/**,/api/users/**
-        # 订单服务
-        - id: order-service
-          uri: lb://order-service
-          predicates:
-            - Path=/api/order/**,/api/orders/**,/api/address/**,/api/after-sale/**
-        # 商品服务
+            - Path=/api/user/**
         - id: product-service
           uri: lb://product-service
           predicates:
-            - Path=/api/product/**,/api/products/**,/api/category/**
-        # 优惠券服务
+            - Path=/api/product/**
+        - id: order-service
+          uri: lb://order-service
+          predicates:
+            - Path=/api/order/**
         - id: coupon-service
           uri: lb://coupon-service
           predicates:
-            - Path=/api/coupon/**,/api/coupons/**
-        # AI Agent
+            - Path=/api/coupon/**
+        - id: memory-service
+          uri: lb://memory-service
+          predicates:
+            - Path=/api/memory/**
         - id: ai-agent
-          uri: http://localhost:8000
+          uri: http://localhost:8000    # ← AI Agent 地址，按需修改
           predicates:
             - Path=/api/ai/**
 
-    sentinel:
-      transport:
-        dashboard: localhost:8580
+# JWT（gateway 不导入 social-common，需要单独配置）
+jwt:
+  secret: your-jwt-secret-key-change-me-at-least-32-chars  # ← 与 social-common 保持一致
+  expiration: 86400000
+  header: Authorization
+  tokenPrefix: "Bearer "

@@ -10,25 +10,30 @@ NACOS_PORT=8848
 NACOS_URL="http://${NACOS_HOST}:${NACOS_PORT}/nacos/v1/cs/configs"
 GROUP="com.social"
 
-echo "Pushing configs to Nacos at ${NACOS_HOST}:${NACOS_PORT} ..."
+CONFIGS=(
+  "social-common.yaml"
+  "social-gateway.yaml"
+  "user-service.yaml"
+  "product-service.yaml"
+  "order-service.yaml"
+  "coupon-service.yaml"
+  "memory-service.yaml"
+)
 
-# social-common (共享配置)
-echo -n "[1/2] social-common.yaml ... "
-curl -s -X POST "$NACOS_URL" \
-  -d "dataId=social-common.yaml" \
-  -d "group=${GROUP}" \
-  -d "type=yaml" \
-  --data-urlencode "content@nacos-config/social-common.yaml" | head -1
+echo "Pushing ${#CONFIGS[@]} configs to Nacos at ${NACOS_HOST}:${NACOS_PORT} ..."
 echo ""
 
-# social-gateway (网关路由)
-echo -n "[2/2] social-gateway.yaml ... "
-curl -s -X POST "$NACOS_URL" \
-  -d "dataId=social-gateway.yaml" \
-  -d "group=${GROUP}" \
-  -d "type=yaml" \
-  --data-urlencode "content@nacos-config/social-gateway.yaml" | head -1
-echo ""
+i=0
+for cfg in "${CONFIGS[@]}"; do
+  i=$((i + 1))
+  echo -n "[$i/${#CONFIGS[@]}] $cfg ... "
+  result=$(curl -s -X POST "$NACOS_URL" \
+    -d "dataId=$cfg" \
+    -d "group=${GROUP}" \
+    -d "type=yaml" \
+    --data-urlencode "content@nacos-config/$cfg")
+  echo "$result"
+done
 
 echo ""
 echo "Done! 打开 Nacos 控制台确认: http://${NACOS_HOST}:${NACOS_PORT}/nacos"

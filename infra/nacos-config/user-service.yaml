@@ -1,0 +1,13 @@
+# ============================================
+# user-service — Data ID: user-service.yaml
+# Group: com.social
+# ============================================
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/social_user    # ← 替换为你的 PostgreSQL 地址
+    username: postgres                                   # ← 替换为你的数据库用户名
+    password:                                            # ← 替换为你的数据库密码
+
+mybatis-plus:
+  type-aliases-package: com.social.userservice.domain.po

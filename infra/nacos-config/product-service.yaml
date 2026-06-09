@@ -1,0 +1,18 @@
+# ============================================
+# product-service — Data ID: product-service.yaml
+# Group: com.social
+# ============================================
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/social_product  # ← 替换为你的 PostgreSQL 地址
+    username: postgres                                    # ← 替换为你的数据库用户名
+    password:                                             # ← 替换为你的数据库密码
+
+mybatis-plus:
+  type-aliases-package: com.social.productservice.domain.po
+
+# 阿里云 OSS（可选，不用则留空）
+aliyun:
+  oss:
+    url-prefix:    # ← 替换为你的 OSS 域名前缀，例如 https://xxx.oss-cn-hangzhou.aliyuncs.com
