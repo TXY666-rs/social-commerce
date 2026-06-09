@@ -1,0 +1,39 @@
+# ============================================
+# Nacos 共享配置 — social-common.yaml
+# Group: com.social
+# ============================================
+# 在 Nacos 控制台 → 配置管理 → 配置列表 中新建：
+#   Data ID:  social-common.yaml
+#   Group:    com.social
+#   格式:     YAML
+#   内容:     以下内容（按需修改）
+# ============================================
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/${DB_NAME}
+    username: postgres
+    password: social123
+    driver-class-name: org.postgresql.Driver
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+
+# MyBatis-Plus 公共配置
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# JWT 配置
+jwt:
+  secret: your-jwt-secret-key-at-least-32-chars-long
+  expiration: 86400000
