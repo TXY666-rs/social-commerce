@@ -544,11 +544,11 @@ onUnmounted(stopPolling)
           </el-descriptions-item>
         </el-descriptions>
 
-        <!-- 按领域统计 -->
-        <div v-if="Object.keys(evalReport.summary.by_domain || {}).length" style="margin-top: 16px;">
-          <h4 style="margin-bottom: 8px;">按领域统计</h4>
-          <el-table :data="Object.entries(evalReport.summary.by_domain).map(([domain, stats]: [string, any]) => ({ domain, ...stats }))" size="small" border>
-            <el-table-column prop="domain" label="领域" width="120" />
+        <!-- 按路由统计 -->
+        <div v-if="Object.keys(evalReport.summary.by_route || {}).length" style="margin-top: 16px;">
+          <h4 style="margin-bottom: 8px;">按路由统计</h4>
+          <el-table :data="Object.entries(evalReport.summary.by_route).map(([route, stats]: [string, any]) => ({ route, ...stats }))" size="small" border>
+            <el-table-column prop="route" label="路由" width="120" />
             <el-table-column prop="total" label="用例数" width="80" />
             <el-table-column prop="passed" label="通过数" width="80" />
             <el-table-column label="准确率">
@@ -588,13 +588,30 @@ onUnmounted(stopPolling)
           <el-table :data="evalReport.details.filter(d => !d.passed)" size="small" border max-height="300">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column prop="message" label="用户输入" min-width="200" show-overflow-tooltip />
-            <el-table-column prop="domain" label="领域" width="80" />
-            <el-table-column label="失败原因" min-width="150">
+            <el-table-column prop="route" label="预期路由" width="110">
               <template #default="{ row }">
-                <span v-if="row.expected_skill_name && !row.skill_matched">Skill 不匹配: 期望={{ row.expected_skill_name }}</span>
-                <span v-else-if="row.keywords_missed?.length">缺少关键词: {{ row.keywords_missed.join(', ') }}</span>
-                <span v-else-if="row.forbidden_found?.length">包含禁止词: {{ row.forbidden_found.join(', ') }}</span>
-                <span v-else-if="row.error">{{ row.error }}</span>
+                <el-tag size="small" :type="row.route === 'agent' ? 'info' : 'primary'">{{ row.route }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="actual_route" label="实际路由" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.actual_route === row.route ? 'success' : 'danger'">{{ row.actual_route }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="失败原因" min-width="200">
+              <template #default="{ row }">
+                <span v-if="row.expected_skill_name && !row.skill_matched" style="color: #e6a23c;">
+                  路由错误: 期望 {{ row.expected_skill_name }}，实际 {{ row.actual_route }}
+                </span>
+                <span v-else-if="row.error" style="color: #f56c6c;">
+                  {{ row.error }}
+                </span>
+                <span v-else-if="row.keywords_missed?.length" style="color: #909399;">
+                  回复不完整: 缺少 {{ row.keywords_missed.join('、') }}
+                </span>
+                <span v-else-if="row.forbidden_found?.length" style="color: #f56c6c;">
+                  包含禁止词: {{ row.forbidden_found.join('、') }}
+                </span>
               </template>
             </el-table-column>
           </el-table>

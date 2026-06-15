@@ -318,11 +318,13 @@ onMounted(() => {
       border-radius: 20px;
       font-weight: 600;
 
-      &.status-0 { background: var(--accent-bg); color: var(--accent); }
-      &.status-1 { background: var(--primary-bg); color: var(--primary); }
-      &.status-2 { background: var(--accent-glow); color: var(--success); }
-      &.status-3 { background: var(--accent-glow); color: var(--success); }
-      &.status-4 { background: var(--bg-page); color: var(--text-muted); }
+        &.status-0 { background: var(--accent-bg); color: var(--accent); }
+        &.status-1 { background: var(--primary-bg); color: var(--primary); }
+        &.status-2 { background: var(--accent-glow); color: var(--success); }
+        &.status-3 { background: var(--accent-glow); color: var(--success); }
+        &.status-4 { background: var(--bg-page); color: var(--text-muted); }
+        &.status-5 { background: #fef0f0; color: #f56c6c; }
+        &.status-6 { background: var(--bg-page); color: var(--text-muted); }
     }
   }
 

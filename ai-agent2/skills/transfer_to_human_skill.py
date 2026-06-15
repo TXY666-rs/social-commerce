@@ -8,6 +8,7 @@
 """
 import structlog
 from skills.base import BaseSkill, ParamDef, SkillState
+from skills.async_utils import async_http_call
 from middleware.context import _get_user_id
 from agents.tools.transfer_tool import do_transfer_to_human
 
@@ -39,17 +40,16 @@ class TransferToHumanSkill(BaseSkill):
         actual_user_id = _get_user_id() or user_id or "anonymous"
 
         try:
-            success, transfer_id, error_msg = do_transfer_to_human(actual_user_id, reason)
+            success, transfer_id, error_msg = await async_http_call(do_transfer_to_human, actual_user_id, reason)
             return (
-                f"正在为您转接人工客服 🙋\n\n"
-                f"📋 转接单号：{transfer_id}\n"
-                f"📝 转接原因：{reason}\n\n"
-                f"当前排队中，请稍候...人工客服接入后会主动联系您。\n"
-                f"在等待期间，您也可以继续向我提问，我会尽力帮助您～"
+                f"正在为您转接人工客服\n\n"
+                f"转接单号：{transfer_id}\n"
+                f"转接原因：{reason}\n\n"
+                f"当前排队中，人工客服接入后会在下次对话时主动联系您。\n"
+                f"在等待期间，您也可以继续向我提问，我会尽力帮助您。"
             )
         except Exception as e:
             logger.error("transfer_skill_failed", error=str(e))
             return (
-                "转接人工客服时出现异常，请稍后重试。\n"
-                "您也可以拨打客服热线 400-xxx-xxxx。"
+                "转接人工客服时出现异常，请稍后重试。"
             )

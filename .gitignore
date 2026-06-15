@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Windows 保留文件名（cmd 重定向残留）
+nul
+
 # Python
 __pycache__/
 *.pyc
@@ -55,3 +58,8 @@ logs/
 # Claude Code
 .claude/
 .workbuddy/
+
+# Docker: 数据库 dump（含实际业务数据，不入库）
+infra/db-dumps/*.sql
+infra/db-dumps/*.dump
+infra/db-dumps/*.backup

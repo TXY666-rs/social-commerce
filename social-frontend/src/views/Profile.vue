@@ -95,7 +95,7 @@ import { useUserStore } from '@/stores/user'
 const router = useRouter()
 const userStore = useUserStore()
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:9000/api'
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
 const uploadAction = `${apiBaseUrl}/upload/image`
 const uploadHeaders = computed(() => {
   const token = userStore.token

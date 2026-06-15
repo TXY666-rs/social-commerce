@@ -11,6 +11,7 @@ logger = structlog.get_logger(__name__)
 # Spring 使用: chat::memory::{userId}
 # ai-agent 使用: chat::ai::session::{session_id}
 KEY_PREFIX = "chat::ai::session::"
+NOTIFY_CHANNEL_PREFIX = "chat::ai::notify::"  # Pub/Sub channel, 一对一 session_id
 TTL_SECONDS = 86400  # 24 小时
 
 
@@ -107,6 +108,22 @@ class SessionManager:
                          session_id=session_id,
                          error=str(e))
             raise RuntimeError(f"保存会话消息失败: {e}")
+
+        # ── 广播通知 SSE 订阅者（失败不影响主流程） ──
+        # 写者 pub，读者 sub；读者收到通知后会重新拉 history 算 diff
+        try:
+            self._redis_client.publish(
+                f"{NOTIFY_CHANNEL_PREFIX}{session_id}",
+                json.dumps(
+                    {"role": role, "ts": int(time.time())},
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception as e:
+            logger.warning("redis_publish_failed",
+                           session_id=session_id,
+                           error=str(e))
+
         return history
 
     def clear_session(self, session_id: str):

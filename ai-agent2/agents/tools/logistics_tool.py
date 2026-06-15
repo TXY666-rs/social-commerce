@@ -1,34 +1,33 @@
-from services.http_client import get_client
 from langchain_core.tools import tool
-from middleware.context import _auth_headers, _get_user_id
+from middleware.context import _get_user_id
 from resilience.decorators import resilient_tool
 from cost.cache import tool_result_cache
 from agents.tools.registry import register_tool
 from agents.tools.constants import ORDER_STATUS, NOT_LOGGED_IN_MSG
+from mock_data import query_orders
 
 
 # ============================================================
-# 内部 helper（返回结构化数据，供 skill 复用，带容错）
+# 兼容性 helper（供 skill 层调用）
 # ============================================================
 
-@resilient_tool()
 def _track_logistics_api(order_id: str = "", product_keyword: str = "") -> list[dict] | None:
-    """查询物流 API，返回原始订单列表。失败返回 None"""
+    """查询物流 API（供 skill 复用）。失败返回 None"""
     user_id = _get_user_id()
-    params = {"user_id": user_id}
-    if order_id:
-        params["order_id"] = order_id
-    if product_keyword:
-        params["product_keyword"] = product_keyword
-    client = get_client()
-    resp = client.get("/api/order/tool/query", headers=_auth_headers(), params=params)
-    resp.raise_for_status()
-    result = resp.json()
-    if result.get("code") != 200:
+    if not user_id:
         return None
-    return result.get("data", [])
+    try:
+        orders = query_orders(user_id, product_keyword)
+        if order_id:
+            orders = [o for o in orders if str(o.get("id")) == str(order_id)]
+        return orders
+    except Exception:
+        return None
 
 
+# ============================================================
+# 物流工具 —— 操作本地 Mock 数据（重构后不再依赖 Java 后端）
+# ============================================================
 
 @register_tool()
 @tool
@@ -45,20 +44,21 @@ def track_logistics(order_id: str = "", product_keyword: str = "") -> str:
     if not user_id:
         return NOT_LOGGED_IN_MSG.format(action="查询物流")
 
-    orders = _track_logistics_api(order_id, product_keyword)
-    if orders is None:
-        return "查询物流失败，请稍后重试。"
+    # 从 mock 数据查询该用户的订单，按 order_id / product_keyword 筛选
+    orders = query_orders(user_id, product_keyword)
+    if order_id:
+        orders = [o for o in orders if str(o.get("id")) == str(order_id)]
     if not orders:
         return "未找到相关订单的物流信息。"
+
     lines = []
     internal_ids = []
     for o in orders:
         status = o.get("status", -1)
-        # Python 自己的 status_map（Java 侧无 statusDesc 字段，无需兜底）
         status_desc = ORDER_STATUS.get(status, "未知")
         line = f"订单 {o.get('productName', '未知商品')} — {status_desc}"
 
-        # ⚠️ 物流信息严格按后端返回字段展示，缺什么标注什么
+        # 物流信息按订单状态展示
         if o.get("trackingNumber"):
             line += f"\n   快递单号: {o['trackingNumber']}"
             if o.get("carrier"):

@@ -5,10 +5,8 @@
 """
 
 # ── 导入工具模块（触发 @register_tool 注册） ──
-import agents.tools.orders_tool        # noqa: F401  注册: get_my_orders, cancel_order
-import agents.tools.goods_tool         # noqa: F401  注册: search_products
+import agents.tools.orders_tool        # noqa: F401  注册: get_my_orders, cancel_order, change_address
 import agents.tools.logistics_tool     # noqa: F401  注册: track_logistics
-import agents.tools.coupon_tool        # noqa: F401  注册: get_available_coupons, get_my_coupons, claim_coupon
 import agents.tools.after_sale_tool    # noqa: F401  注册: request_refund, request_return, ...
 import agents.tools.transfer_tool      # noqa: F401  注册: transfer_to_human
 

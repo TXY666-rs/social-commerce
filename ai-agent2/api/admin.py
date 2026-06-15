@@ -18,12 +18,15 @@
 import json
 import os
 import time
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import structlog
 
 from services.redis_client import get_redis
 from memory.session_memory import SessionManager
+from api.dependencies import get_async_redis
 
 logger = structlog.get_logger(__name__)
 
@@ -192,16 +195,7 @@ async def reply_to_user(transfer_id: str, request: ReplyRequest):
         user_id = ticket.get("user_id", "")
         session_id = f"user_{user_id}"
 
-        human_reply = {
-            "role": "assistant",
-            "content": request.content,
-            "timestamp": time.time(),
-            "source": "human_agent",
-            "agent_name": request.agent_name,
-        }
-        r.rpush(f"chat::history::{session_id}", json.dumps(human_reply, ensure_ascii=False))
-
-        # 同步写入 Agent 会话历史（下次对话 Agent 能读到）
+        # 写入 Agent 会话历史（下次对话 Agent 能读到，且通过 SessionManager 自动 publish 通知用户端 SSE）
         _session_mgr.add_message(session_id, "assistant", request.content)
 
         logger.info("human_reply_sent",
@@ -258,6 +252,149 @@ async def complete_transfer(transfer_id: str):
     except Exception as e:
         logger.error("complete_transfer_failed", error=str(e))
         raise HTTPException(status_code=500, detail="完成转接失败")
+
+
+# ============================================================
+# 清理工单数据
+# ============================================================
+
+@router.delete("/transfer/clear")
+async def clear_all_transfers():
+    """清理所有转人工工单（队列 + 工单详情 + 转接标记）
+
+    使用场景：服务重启后旧工单引用断裂（session 已清），手动或自动清理。
+    """
+    try:
+        r = get_redis()
+        count = 0
+
+        # 1. 清理转接队列
+        queue_len = r.llen("chat::transfer::queue")
+        if queue_len > 0:
+            r.delete("chat::transfer::queue")
+            count += queue_len
+
+        # 2. 清理工单详情
+        ticket_keys = r.keys("chat::transfer::ticket::*")
+        if ticket_keys:
+            r.delete(*ticket_keys)
+            count += len(ticket_keys)
+
+        # 3. 清理转接标记（chat::transfer::user_*）
+        mark_keys = r.keys("chat::transfer::user_*")
+        if mark_keys:
+            r.delete(*mark_keys)
+            count += len(mark_keys)
+
+        logger.info("transfer_cleared", queue_items=queue_len,
+                     tickets=len(ticket_keys), markers=len(mark_keys))
+        return {"status": "ok", "cleared": count}
+    except Exception as e:
+        logger.error("clear_transfers_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="清理工单失败")
+
+
+# ============================================================
+# 管理端 SSE — 转人工工单实时消息流
+# ============================================================
+
+@router.get("/transfer/{transfer_id}/stream")
+async def admin_transfer_stream(transfer_id: str, token: str = Query("")):
+    """管理端 SSE 长连接 — 实时接收用户在转人工期间的聊天消息和状态变更
+
+    订阅 Redis Pub/Sub 通道，add_message 会 publish 通知，新消息 ~10ms 到达。
+    启动瞬间补推历史，修复"竞争漏推"（admin 接入前用户已发消息）。
+    """
+    from services.auth import verify_token
+
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少认证 token")
+
+    user_info = await verify_token(token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="token 验证失败")
+
+    # 验证工单存在
+    r = get_redis()
+    ticket_raw = r.get(f"chat::transfer::ticket::{transfer_id}")
+    if not ticket_raw:
+        raise HTTPException(status_code=404, detail="工单不存在或已过期")
+
+    ticket = json.loads(ticket_raw)
+    user_id = ticket.get("user_id", "")
+    session_id = f"user_{user_id}"
+
+    async def event_generator():
+        yield f"data: {json.dumps({'type': 'connected', 'transfer_id': transfer_id}, ensure_ascii=False)}\n\n"
+
+        # ── 启动瞬间补推历史 ──
+        try:
+            history = _session_mgr.get_history(session_id)
+        except Exception as e:
+            logger.warning("admin_sse_initial_history_failed", error=str(e))
+            history = []
+        last_idx = len(history)
+        for msg in history:
+            if msg.get("role") == "user":
+                yield f"data: {json.dumps({'type': 'message', 'role': 'user', 'content': msg.get('content', ''), 'source': 'user', 'timestamp': msg.get('timestamp', '')}, ensure_ascii=False)}\n\n"
+
+        # ── 订阅 Pub/Sub ──
+        ar = get_async_redis()
+        pubsub = ar.pubsub()
+        channel = f"chat::ai::notify::{session_id}"
+        try:
+            await pubsub.subscribe(channel)
+        except Exception as e:
+            logger.error("admin_sse_subscribe_failed", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'message': 'subscribe_failed'}, ensure_ascii=False)}\n\n"
+            return
+
+        try:
+            while True:
+                try:
+                    raw = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except Exception as e:
+                    logger.warning("admin_sse_get_message_failed", error=str(e))
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if raw is not None and raw.get("type") == "message":
+                    try:
+                        new_history = _session_mgr.get_history(session_id)
+                        for msg in new_history[last_idx:]:
+                            if msg.get("role") == "user":
+                                yield f"data: {json.dumps({'type': 'message', 'role': 'user', 'content': msg.get('content', ''), 'source': 'user', 'timestamp': msg.get('timestamp', '')}, ensure_ascii=False)}\n\n"
+                        last_idx = len(new_history)
+                    except Exception as e:
+                        logger.warning("admin_sse_read_history_failed", error=str(e))
+
+                # 检查工单状态
+                try:
+                    fresh_ticket_raw = r.get(f"chat::transfer::ticket::{transfer_id}")
+                except Exception:
+                    fresh_ticket_raw = ticket_raw
+                if not fresh_ticket_raw:
+                    yield f"data: {json.dumps({'type': 'status', 'status': 'completed'}, ensure_ascii=False)}\n\n"
+                    break
+                try:
+                    fresh_ticket = json.loads(fresh_ticket_raw)
+                    if fresh_ticket.get("status") == "completed":
+                        yield f"data: {json.dumps({'type': 'status', 'status': 'completed'}, ensure_ascii=False)}\n\n"
+                        break
+                except Exception:
+                    pass
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 # ============================================================

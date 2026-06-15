@@ -84,7 +84,7 @@ def resilient_tool(
             current_delay = delay
             last_error = None
 
-            for attempt in range(1, max_retries + 2): 
+            for attempt in range(1, max_retries + 2):
                 start = time.monotonic()
                 try:
                     result = func(*args, **kwargs)
@@ -98,7 +98,7 @@ def resilient_tool(
                     duration = time.monotonic() - start
                     last_error = e
 
-                    # 认证/客户端错误 → 不重试，直接抛
+                    # 认证/客户端错误 → 不重试，直接抛（记录一次失败）
                     if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in NON_RETRYABLE_STATUS:
                         status = e.response.status_code
                         logger.warning("tool_non_retryable_error", tool=tool_name,
@@ -106,10 +106,9 @@ def resilient_tool(
                         breaker.record_failure()
                         raise
 
-                    # 瞬态失败 → 通知熔断器 + 判断是否重试
-                    breaker.record_failure()
-
+                    # 瞬态失败 → 判断是否重试
                     if attempt <= max_retries:
+                        # 重试阶段：不记录到熔断器（避免单次故障多次计数）
                         jitter = current_delay * (0.75 + random.random() * 0.5)
                         logger.warning("tool_retry", tool=tool_name, attempt=attempt,
                                        max_retries=max_retries, error=str(e)[:200],
@@ -117,6 +116,8 @@ def resilient_tool(
                         time.sleep(jitter)
                         current_delay *= backoff
                     else:
+                        # 所有重试耗尽：只在最终失败时记录一次到熔断器
+                        breaker.record_failure()
                         logger.error("tool_all_retries_exhausted", tool=tool_name,
                                      attempts=attempt, error=str(e)[:200])
 

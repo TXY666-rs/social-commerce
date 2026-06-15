@@ -53,6 +53,7 @@ async def record_chat(
     tool_errors: list[str] | None = None,
     sentiment: str = "neutral",
     transfer: bool = False,
+    model_name: str = "",
 ) -> None:
     """每次对话完成后记录统计数据"""
     try:
@@ -76,13 +77,15 @@ async def record_chat(
         if transfer:
             pipe.incr(_k(today, "transfers"))
 
+        # 模型使用计数
+        if model_name:
+            pipe.incr(_k(today, "model_usage", model_name))
+
         # 活跃 Session
         pipe.setex(_active_k(session_id), ACTIVE_TTL, "1")
 
-        pipe.execute()
-
-        # 统一设置 TTL（所有当日统计 key 48h 后自动清理）
-        all_keys = [
+        # 收集所有需要设置 TTL 的 key
+        ttl_keys = [
             _k(today, "conversations"),
             _k(today, "faq_hits"),
             _k(today, "transfers"),
@@ -91,11 +94,16 @@ async def record_chat(
             _k(today, "sentiment", "negative"),
         ]
         for name in (tool_calls or []):
-            all_keys.append(_k(today, "tool_calls", name))
+            ttl_keys.append(_k(today, "tool_calls", name))
         for name in (tool_errors or []):
-            all_keys.append(_k(today, "tool_errors", name))
-        for k in all_keys:
-            r.expire(k, STATS_TTL)
+            ttl_keys.append(_k(today, "tool_errors", name))
+        if model_name:
+            ttl_keys.append(_k(today, "model_usage", model_name))
+        # EXPIRE 合并到 pipeline 中，避免 N 次独立往返
+        for k in ttl_keys:
+            pipe.expire(k, STATS_TTL)
+
+        pipe.execute()
 
     except Exception:
         pass  # 统计数据收集失败不影响主流程
@@ -124,8 +132,9 @@ async def record_conversation_detail(
     output_tokens: int,
     duration_ms: float,
     agent_type: str,
+    model_name: str = "",
 ) -> None:
-    """记录每轮对话的详细指标（token 消耗 + 耗时）"""
+    """记录每轮对话的详细指标（token 消耗 + 耗时 + 模型）"""
     try:
         r = get_redis()
         today = _today()
@@ -137,14 +146,16 @@ async def record_conversation_detail(
             "total_tokens": total,
             "duration_ms": int(duration_ms),
             "agent": agent_type,
+            "model": model_name,
             "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
         }, ensure_ascii=False)
         ts = time.time()
-        r.zadd(f"stats:conv:{today}", {record: ts})
-        r.expire(f"stats:conv:{today}", DETAIL_TTL)
-        # 单日总 token 计数器
-        r.incrby(f"stats:daily:total_tokens:{today}", total)
-        r.expire(f"stats:daily:total_tokens:{today}", DETAIL_TTL)
+        pipe = r.pipeline()
+        pipe.zadd(f"stats:conv:{today}", {record: ts})
+        pipe.expire(f"stats:conv:{today}", DETAIL_TTL)
+        pipe.incrby(f"stats:daily:total_tokens:{today}", total)
+        pipe.expire(f"stats:daily:total_tokens:{today}", DETAIL_TTL)
+        pipe.execute()
     except Exception:
         pass
 
@@ -174,8 +185,10 @@ def _sync_record_tool_detail(tool_name: str, duration_ms: float, success: bool) 
             "time": datetime.now().strftime("%H:%M:%S"),
         }, ensure_ascii=False)
         ts = time.time()
-        r.zadd(f"stats:tool:{today}", {record: ts})
-        r.expire(f"stats:tool:{today}", DETAIL_TTL)
+        pipe = r.pipeline()
+        pipe.zadd(f"stats:tool:{today}", {record: ts})
+        pipe.expire(f"stats:tool:{today}", DETAIL_TTL)
+        pipe.execute()
     except Exception:
         pass
 
@@ -211,7 +224,7 @@ async def get_dashboard_stats() -> dict:
 
         # 工具调用统计
         tool_pattern = f"{base}tool_calls:*"
-        tool_keys = list(r.scan_iter(match=tool_pattern, count=50))
+        tool_keys = list(r.scan_iter(match=tool_pattern, count=200))
         tools = []
         for tk in tool_keys:
             name = tk.rsplit(":", 1)[-1]
@@ -224,7 +237,7 @@ async def get_dashboard_stats() -> dict:
 
         # 活跃 Session 数
         active_pattern = "stats:active:*"
-        active_count = sum(1 for _ in r.scan_iter(match=active_pattern, count=100))
+        active_count = sum(1 for _ in r.scan_iter(match=active_pattern, count=500))
 
         # FAQ 命中率
         faq_rate = round(faq_hits / conversations * 100, 1) if conversations > 0 else 0
@@ -262,6 +275,24 @@ async def get_dashboard_stats() -> dict:
                 tool_fail += 1
         tool_total = tool_success + tool_fail
 
+        # 模型使用统计
+        model_pattern = f"{base}model_usage:*"
+        model_keys = list(r.scan_iter(match=model_pattern, count=50))
+        model_usage = []
+        for mk in model_keys:
+            name = mk.rsplit(":", 1)[-1]
+            count = int(r.get(mk) or 0)
+            if count > 0:
+                model_usage.append({"name": name, "count": count})
+        model_usage.sort(key=lambda m: m["count"], reverse=True)
+
+        # 当前 LLM 状态
+        try:
+            from resilience.llm_factory import get_llm_status
+            llm_status = get_llm_status()
+        except Exception:
+            llm_status = {}
+
         return {
             "today": {
                 "conversations": conversations,
@@ -283,6 +314,8 @@ async def get_dashboard_stats() -> dict:
                 "success": tool_success,
                 "fail": tool_fail,
             },
+            "model_usage": model_usage,
+            "llm_status": llm_status,
             "conversations_detail": conversations_detail,
             "tool_details": tool_details,
         }
@@ -294,6 +327,8 @@ async def get_dashboard_stats() -> dict:
             "feedback": {"up": 0, "down": 0, "rate": 0},
             "tools": [],
             "tool_summary": {"total": 0, "success": 0, "fail": 0},
+            "model_usage": [],
+            "llm_status": {},
             "conversations_detail": [],
             "tool_details": [],
         }

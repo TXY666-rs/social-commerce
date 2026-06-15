@@ -1,14 +1,15 @@
-"""基础设施服务层 — Nacos客户端、Redis连接、HTTP客户端
+"""基础设施服务层 — Redis 连接（核心）+ Nacos 客户端（可选）
 
-LLM 相关功能已迁移到 resilience 模块。
+重构后：
+  - Redis 是核心依赖（记忆/Skill/mock 数据都依赖它）
+  - HTTP 客户端已删除（不再调 Java 后端）
+  - Nacos 改为可选（连不上只 warning，不影响启动）
 """
 
-from services.nacos_client import nacos_client, NacosClient
-from services.http_client import get_client, close_client
 from services.redis_client import get_redis
+from services.nacos_client import nacos_client, NacosClient
 
 __all__ = [
-    "nacos_client", "NacosClient",
-    "get_client", "close_client",
     "get_redis",
+    "nacos_client", "NacosClient",
 ]

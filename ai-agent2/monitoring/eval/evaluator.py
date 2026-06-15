@@ -10,9 +10,16 @@
   Skill 优先匹配 → 未命中的请求交给单个 React Agent 处理
   不再有多 Agent 路由，因此不检查 agent_type
 
+路由分组（route）：
+  按实际路由路径分组，直接反映系统的路由决策质量
+  - 具体 skill 名（track_order, return_item 等）：Skill 触发
+  - faq：FAQ 优先匹配命中
+  - agent：未命中任何 Skill/FAQ，交给 ReAct Agent
+  - safety：被安全模块拦截
+
 使用方式：
     python -m monitoring.eval.runner
-    python -m monitoring.eval.runner --domain order
+    python -m monitoring.eval.runner --route track_order
 """
 
 import json
@@ -41,7 +48,7 @@ class EvalMetrics:
     skill_total: int = 0                 # 设置了 expected_skill 的用例总数
     skill_matched_count: int = 0         # 技能匹配正确的用例数
     by_skill: dict = field(default_factory=dict)   # 按技能分组统计
-    by_domain: dict = field(default_factory=dict)  # 按领域分组统计
+    by_route: dict = field(default_factory=dict)   # 按路由分组统计
 
 
 @dataclass
@@ -53,7 +60,7 @@ class TestCase:
     forbidden_keywords: list[str] = field(default_factory=list) # 回复中不应包含的关键词
     expected_tools: list[str] = field(default_factory=list)     # 期望调用的工具
     expected_skill: Optional[str] = None                        # 期望命中的技能（null = 不触发 Skill，交给 Agent）
-    domain: str = "general"                                     # 领域分类
+    route: str = "agent"                                        # 路由分类（skill名/faq/agent/safety）
     difficulty: str = "easy"                                    # easy / medium / hard
     should_block: bool = False                                  # 是否期望被安全模块拦截
 
@@ -69,6 +76,7 @@ class EvalResult:
     tools_called: list[str] = field(default_factory=list)
     skill_matched: bool = False
     expected_skill_name: str = ""
+    actual_skill_name: str = ""
     reply: str = ""
     latency_ms: float = 0.0
     error: Optional[str] = None
@@ -92,7 +100,7 @@ def load_test_cases(path: str) -> list[TestCase]:
             forbidden_keywords=item.get("forbidden_keywords", []),
             expected_tools=item.get("expected_tools", []),
             expected_skill=item.get("expected_skill", None),
-            domain=item.get("domain", "general"),
+            route=item.get("route", "agent"),
             difficulty=item.get("difficulty", "easy"),
             should_block=item.get("should_block", False),
         ))
@@ -156,6 +164,7 @@ def evaluate_reply(case: TestCase, reply: str,
         tools_called=tools_called,
         skill_matched=skill_matched,
         expected_skill_name=case.expected_skill or "",
+        actual_skill_name=skill_name,
         reply=reply,
         latency_ms=latency_ms,
     )
@@ -208,16 +217,16 @@ def compute_metrics(results: list[EvalResult]) -> EvalMetrics:
             "accuracy": sum(1 for r in srs if r.skill_matched) / len(srs) if srs else 0,
         }
 
-    # 按领域分组
-    domain_results: dict[str, list[EvalResult]] = {}
+    # 按路由分组
+    route_results: dict[str, list[EvalResult]] = {}
     for r in results:
-        domain = r.case.domain
-        domain_results.setdefault(domain, []).append(r)
-    for domain, drs in domain_results.items():
-        m.by_domain[domain] = {
-            "total": len(drs),
-            "passed": sum(1 for r in drs if r.passed),
-            "accuracy": sum(1 for r in drs if r.passed) / len(drs) if drs else 0,
+        route = r.case.route
+        route_results.setdefault(route, []).append(r)
+    for route, rrs in route_results.items():
+        m.by_route[route] = {
+            "total": len(rrs),
+            "passed": sum(1 for r in rrs if r.passed),
+            "accuracy": sum(1 for r in rrs if r.passed) / len(rrs) if rrs else 0,
         }
 
     return m
@@ -239,17 +248,20 @@ def generate_report(results: list[EvalResult], metrics: EvalMetrics, output_path
             "skill_accuracy": round(metrics.skill_accuracy, 4),
             "skill_total": metrics.skill_total,
             "skill_matched_count": metrics.skill_matched_count,
-            "by_domain": metrics.by_domain,
+            "by_route": metrics.by_route,
             "by_skill": metrics.by_skill,
         },
         "details": [],
     }
 
     for r in results:
+        # 计算实际路由：有 skill 命中 → skill 名，否则 → agent
+        actual_route = r.actual_skill_name if r.actual_skill_name else "agent"
         report["details"].append({
             "id": r.case.id,
             "message": r.case.message,
-            "domain": r.case.domain,
+            "route": r.case.route,
+            "actual_route": actual_route,
             "difficulty": r.case.difficulty,
             "passed": r.passed,
             "skill_matched": r.skill_matched,
@@ -277,10 +289,10 @@ def generate_report(results: list[EvalResult], metrics: EvalMetrics, output_path
     print(f"  幻觉率: {metrics.hallucination_rate:.1%}")
     print(f"  平均延迟: {metrics.avg_latency_ms:.0f}ms")
     print(f"{'='*60}")
-    if metrics.by_domain:
-        print("  按领域:")
-        for domain, stats in metrics.by_domain.items():
-            print(f"    {domain}: {stats['accuracy']:.1%} ({stats['passed']}/{stats['total']})")
+    if metrics.by_route:
+        print("  按路由:")
+        for route, stats in metrics.by_route.items():
+            print(f"    {route}: {stats['accuracy']:.1%} ({stats['passed']}/{stats['total']})")
     if metrics.by_skill:
         print("  按技能:")
         for skill_name, stats in metrics.by_skill.items():

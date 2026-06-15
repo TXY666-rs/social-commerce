@@ -2,7 +2,7 @@ import json
 import time
 import asyncio
 from typing import Optional
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Header, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 import structlog
 
@@ -12,7 +12,7 @@ from middleware.auth import resolve_user
 from agents.executor import stream_react_agent
 from agents.summarizer import summarize_conversation
 from memory import SessionManager
-from api.dependencies import get_session_manager
+from api.dependencies import get_session_manager, get_async_redis
 from middleware.context import set_request_context, clear_request_context
 from monitoring.realtime import record_eval_data
 from core.security import validate_input, sanitize_output, record_security_event, detect_pii, mask_pii
@@ -136,6 +136,33 @@ async def chat(
 
     logger.info("chat_request", user_id=user_id, session_id=session_id, trace_id=get_trace_id())
 
+    # ── 转人工阻断：转人工期间用户消息不进 AI，直接转发给人工客服 ──
+    try:
+        from services.redis_client import get_redis as _get_redis
+        _r = _get_redis()
+        _transfer_status = _r.get(f"chat::transfer::{session_id}")
+    except Exception:
+        _transfer_status = None
+
+    if _transfer_status and _transfer_status in ("pending", "accepted"):
+        # 用户消息写入会话历史 + publish 通知管理端 SSE
+        session_manager.add_message(session_id, "user", request.message)
+        return ChatResponse(
+            reply="",
+            session_id=session_id,
+            agent_type="human_transfer",
+            tools_called=[],
+            route_source="human_transfer",
+            skill_name="",
+            eval=EvalInfo(
+                route_confidence="high",
+                route_reason="转人工期间，消息转发给人工客服",
+                safety={"injection": False, "pii": False, "leak": False},
+                latency={"routing_ms": 0, "total_ms": 0},
+                token={"input": 0, "output": 0},
+            ),
+        )
+
     t0 = time.monotonic()
     try:
         agent_stream = stream_react_agent(messages, request.token or "", user_id, session_id)
@@ -197,6 +224,23 @@ async def chat_stream(
 
     async def event_generator():
         t0 = time.monotonic()
+
+        # ── 转人工阻断：转人工期间用户消息不进 AI，直接转发给人工客服 ──
+        try:
+            from services.redis_client import get_redis as _get_redis
+            _r = _get_redis()
+            _transfer_status = _r.get(f"chat::transfer::{session_id}")
+        except Exception:
+            _transfer_status = None
+
+        if _transfer_status and _transfer_status in ("pending", "accepted"):
+            # 用户消息写入会话历史（role=user），并通过 SessionManager publish 通知管理端 SSE
+            session_manager.add_message(session_id, "user", request.message)
+            # 转人工期间：不产生 AI 回复，发 human_transfer 标记让前端静默，
+            # 真正的人工回复由 /chat/transfer-wait SSE 推送，前端据此跳过空回复兜底文案。
+            yield f"data: {json.dumps({'human_transfer': True, 'done': True, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+            return
+
         full_reply = []
         agent_type = "unknown"
         route_source = "unknown"
@@ -252,13 +296,132 @@ async def chat_stream(
     )
 
 
+def _make_transfer_sse_generator(session_manager: SessionManager, session_id: str, initial_msg: str):
+    """创建转人工 SSE 生成器 — 订阅 Redis Pub/Sub，新消息秒推
+
+    跟 AI 流式回复完全一样的体验：SSE 开着，收到内容就推，前端无需轮询。
+    写者 add_message 会 publish 到 chat::ai::notify::{session_id}，这里订阅即可。
+    """
+    async def _filter_assistant_non_user(m: dict) -> bool:
+        # 只推 role=assistant 的消息（admin 回复 / system 提示）；用户消息由 admin 端 SSE 推
+        return m.get("role") == "assistant"
+
+    async def _format_msg(m: dict) -> str:
+        return f"data: {json.dumps({'content': m['content'], 'role': m['role'], 'timestamp': m.get('timestamp', '')}, ensure_ascii=False)}\n\n"
+
+    async def generator():
+        if initial_msg:
+            yield f"data: {json.dumps({'content': initial_msg}, ensure_ascii=False)}\n\n"
+
+        # ── 启动瞬间补推历史（修复"竞争漏推"：admin 端连接前用户已发消息） ──
+        try:
+            history = session_manager.get_history(session_id)
+            for m in history:
+                if await _filter_assistant_non_user(m):
+                    yield await _format_msg(m)
+            last_idx = len(history)
+        except Exception as e:
+            logger.warning("transfer_sse_initial_history_failed", error=str(e))
+            last_idx = 0
+
+        # ── 订阅 Pub/Sub，阻塞等新消息 ──
+        ar = get_async_redis()
+        pubsub = ar.pubsub()
+        channel = f"chat::ai::notify::{session_id}"
+        try:
+            await pubsub.subscribe(channel)
+        except Exception as e:
+            logger.error("transfer_sse_subscribe_failed", error=str(e))
+            yield f"data: {json.dumps({'done': True, 'session_id': session_id, 'error': 'subscribe_failed'}, ensure_ascii=False)}\n\n"
+            return
+
+        try:
+            while True:
+                try:
+                    raw = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except Exception as e:
+                    logger.warning("transfer_sse_get_message_failed", error=str(e))
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if raw is not None and raw.get("type") == "message":
+                    try:
+                        new_history = session_manager.get_history(session_id)
+                        for m in new_history[last_idx:]:
+                            if await _filter_assistant_non_user(m):
+                                yield await _format_msg(m)
+                        last_idx = len(new_history)
+                    except Exception as e:
+                        logger.warning("transfer_sse_read_history_failed", error=str(e))
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            except Exception:
+                pass
+
+        yield f"data: {json.dumps({'done': True, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+    return generator()
+
+
 @router.get("/chat/history/{session_id}")
 async def get_chat_history(session_id: str, session_manager: SessionManager = Depends(get_session_manager)):
     history = session_manager.get_history(session_id)
     return {"session_id": session_id, "messages": history}
 
 
+@router.get("/chat/transfer-status/{user_id}")
+async def get_transfer_status(user_id: str):
+    """查询用户当前的转人工状态
+
+    Returns:
+        {"status": "pending"|"accepted"|"completed"|null}
+    """
+    session_id = f"user_{user_id}"
+    try:
+        from services.redis_client import get_redis
+        r = get_redis()
+        status = r.get(f"chat::transfer::{session_id}")
+        if not status:
+            return {"status": None}
+        return {"status": status.decode() if isinstance(status, bytes) else status}
+    except Exception:
+        return {"status": None}
+
+
 @router.delete("/chat/clear/{session_id}")
 async def clear_chat(session_id: str, session_manager: SessionManager = Depends(get_session_manager)):
     session_manager.clear_session(session_id)
     return {"session_id": session_id, "message": "会话已清除"}
+
+
+@router.get("/chat/transfer-wait")
+async def chat_transfer_wait(
+    session_id: str = Query(...),
+    token: str = Query(""),
+):
+    """用户端持久 SSE — 转人工期间自动连接，等待管理员消息和状态变更
+
+    前端检测到转人工状态后，自动 fetch 此端点建立 SSE 连接。
+    不需要用户主动发消息，纯等待推送。
+    """
+    from middleware.auth import resolve_user
+
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少认证 token")
+
+    user_info = await resolve_user(None, None, f"Bearer {token}", None)
+    if not user_info or not user_info.id:
+        raise HTTPException(status_code=401, detail="token 验证失败")
+
+    if session_id != f"user_{user_info.id}":
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+
+    session_manager = get_session_manager()
+
+    return StreamingResponse(
+        _make_transfer_sse_generator(session_manager, session_id, ""),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )

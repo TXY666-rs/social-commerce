@@ -4,10 +4,10 @@
 评估维度：Skill 命中率 + 回复质量 + 安全拦截
 
 使用方式：
-    python -m monitoring.eval.runner                    # 运行全部用例
-    python -m monitoring.eval.runner --domain order      # 只运行订单领域
-    python -m monitoring.eval.runner --difficulty easy   # 只运行简单用例
-    python -m monitoring.eval.runner --report report.json # 输出报告到文件
+    python -m monitoring.eval.runner                       # 运行全部用例
+    python -m monitoring.eval.runner --route track_order   # 只运行 track_order 路由
+    python -m monitoring.eval.runner --difficulty easy     # 只运行简单用例
+    python -m monitoring.eval.runner --report report.json  # 输出报告到文件
 """
 
 import asyncio
@@ -32,13 +32,13 @@ EVAL_USER_ID = "1"
 
 def filter_cases(
     cases: list[TestCase],
-    domain: str | None = None,
+    route: str | None = None,
     difficulty: str | None = None,
 ) -> list[TestCase]:
-    """按领域/难度筛选测试用例"""
+    """按路由/难度筛选测试用例"""
     result = []
     for tc in cases:
-        if domain and tc.domain != domain:
+        if route and tc.route != route:
             continue
         if difficulty and tc.difficulty != difficulty:
             continue
@@ -110,7 +110,7 @@ async def run_single_test(
 
 
 async def run_evaluation(
-    domain: str | None = None,
+    route: str | None = None,
     difficulty: str | None = None,
     report_path: str | None = None,
     auth_token: str | None = None,
@@ -119,15 +119,15 @@ async def run_evaluation(
     """运行完整评估流程"""
     cases_path = str(Path(__file__).parent / "test_cases.json")
     all_cases = load_test_cases(cases_path)
-    test_cases = filter_cases(all_cases, domain, difficulty)
+    test_cases = filter_cases(all_cases, route, difficulty)
 
     if not test_cases:
         print("未找到匹配的测试用例")
         return {}
 
     print(f"加载 {len(test_cases)} 条测试用例...")
-    if domain:
-        print(f"  领域筛选: {domain}")
+    if route:
+        print(f"  路由筛选: {route}")
     if difficulty:
         print(f"  难度筛选: {difficulty}")
     print(f"  评估用户ID: {eval_user_id}")
@@ -172,14 +172,14 @@ async def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(description="AI Agent 评估执行器")
-    parser.add_argument("--domain", type=str, help="按领域筛选: order/product/after_sale/coupon/safety/faq")
+    parser.add_argument("--route", type=str, help="按路由筛选: track_order/return_item/agent/safety/faq 等")
     parser.add_argument("--difficulty", type=str, help="按难度筛选: easy/medium/hard")
     parser.add_argument("--report", type=str, help="报告输出路径 (JSON)")
     parser.add_argument("--token", type=str, help="认证 token（避免 401 错误）")
     args = parser.parse_args()
 
     asyncio.run(run_evaluation(
-        domain=args.domain,
+        route=args.route,
         difficulty=args.difficulty,
         report_path=args.report,
         auth_token=args.token,

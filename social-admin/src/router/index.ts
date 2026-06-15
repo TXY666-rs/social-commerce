@@ -1,18 +1,16 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-import { getCookie } from '@/utils/cookie'
+
+// 初始化 demo token（重构后免登录，admin 直接用 demo 用户）
+if (!localStorage.getItem('token')) {
+  localStorage.setItem('token', '1')
+  document.cookie = 'token=1; path=/; max-age=2592000'
+}
 
 const routes: RouteRecordRaw[] = [
   {
-    path: '/login',
-    name: 'login',
-    component: () => import('@/views/Login.vue'),
-    meta: { requiresAuth: false }
-  },
-  {
     path: '/',
     component: () => import('@/layouts/AdminLayout.vue'),
-    meta: { requiresAuth: true },
     children: [
       {
         path: '',
@@ -39,19 +37,6 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes
-})
-
-router.beforeEach((to, _from, next) => {
-  const token = getCookie('token') || localStorage.getItem('token')
-  const isLoggedIn = !!token
-
-  if (to.meta.requiresAuth && !isLoggedIn) {
-    next({ path: '/login', query: { redirect: to.fullPath } })
-  } else if (to.path === '/login' && isLoggedIn) {
-    next('/')
-  } else {
-    next()
-  }
 })
 
 export default router

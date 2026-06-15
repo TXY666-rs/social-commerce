@@ -1,6 +1,6 @@
 """工具结果缓存 — 基于内存的 TTL 缓存
 
-对查询类工具（get_my_orders, search_products, track_logistics 等）添加短 TTL 缓存，
+对查询类工具（get_my_orders, track_logistics 等）添加短 TTL 缓存，
 避免用户连续提问时重复调用后端 API。
 
 使用方式：
@@ -28,9 +28,13 @@ logger = structlog.get_logger(__name__)
 
 # 内存缓存：cache_key → (expire_at, result)
 _cache: dict[str, tuple[float, str]] = {}
+_CACHE_MAX_SIZE = 10000  # 最大缓存条目数
+import threading
+_cache_lock = threading.Lock()
 
 # 缓存统计
 _stats = {"hits": 0, "misses": 0}
+_stats_lock = threading.Lock()
 
 
 def tool_result_cache(ttl: int = 60):
@@ -44,13 +48,12 @@ def tool_result_cache(ttl: int = 60):
         def wrapper(*args, **kwargs) -> str:
             # 构建缓存 key：函数名 + 排序后的参数
             key_parts = [func.__name__]
-            # 跳过第一个 self 参数（如果有）
             for a in args:
-                key_parts.append(str(a))
+                key_parts.append(json.dumps(a, sort_keys=True, default=str, ensure_ascii=False))
             for k, v in sorted(kwargs.items()):
-                key_parts.append(f"{k}={v}")
+                key_parts.append(f"{k}={json.dumps(v, sort_keys=True, default=str, ensure_ascii=False)}")
             cache_key = hashlib.md5(
-                json.dumps(key_parts, ensure_ascii=False).encode()
+                "|".join(key_parts).encode()
             ).hexdigest()
 
             # 检查缓存
@@ -58,24 +61,32 @@ def tool_result_cache(ttl: int = 60):
             if cache_key in _cache:
                 expire_at, result = _cache[cache_key]
                 if now < expire_at:
-                    _stats["hits"] += 1
+                    with _cache_lock:
+                        _stats["hits"] += 1
                     logger.debug("tool_cache_hit", func=func.__name__, key=cache_key[:8])
                     return result
                 else:
                     del _cache[cache_key]
 
             # 缓存未命中，执行函数
-            _stats["misses"] += 1
+            with _cache_lock:
+                _stats["misses"] += 1
             result = func(*args, **kwargs)
 
             # 只缓存成功的非空结果
             if result and not result.startswith("用户未登录") and "失败" not in result[:20]:
-                _cache[cache_key] = (now + ttl, result)
+                with _cache_lock:
+                    # 超限时清理过期条目
+                    if len(_cache) >= _CACHE_MAX_SIZE:
+                        _cleanup_expired(now)
+                    _cache[cache_key] = (now + ttl, result)
                 logger.debug("tool_cache_set", func=func.__name__, ttl=ttl)
 
             # 定期清理过期条目（每次 miss 时有 5% 概率触发）
-            if _stats["misses"] % 20 == 0:
-                _cleanup_expired(now)
+            misses_count = _stats["misses"]
+            if misses_count % 20 == 0:
+                with _cache_lock:
+                    _cleanup_expired(now)
 
             return result
         return wrapper

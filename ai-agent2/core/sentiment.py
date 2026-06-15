@@ -142,3 +142,38 @@ def save_sentiment_count(session_id: str, count: int) -> None:
         r.setex(key, SENTIMENT_TTL, data)
     except Exception as e:
         logger.warning("save_sentiment_failed", error=str(e), session_id=session_id)
+
+
+# ============================================================
+# 异步版本 — 供 async 上下文使用（不阻塞事件循环）
+# ============================================================
+
+async def async_get_sentiment_count(session_id: str) -> int:
+    """异步版本：从 Redis 读取累计负面次数"""
+    if not session_id:
+        return 0
+    try:
+        from services.redis_client import get_async_redis
+        r = get_async_redis()
+        key = f"chat::ai::sentiment::{session_id}"
+        raw = await r.get(key)
+        if raw:
+            data = json.loads(raw)
+            return data.get("cumulative_negative", 0)
+    except Exception:
+        pass
+    return 0
+
+
+async def async_save_sentiment_count(session_id: str, count: int) -> None:
+    """异步版本：保存累计负面次数到 Redis"""
+    if not session_id:
+        return
+    try:
+        from services.redis_client import get_async_redis
+        r = get_async_redis()
+        key = f"chat::ai::sentiment::{session_id}"
+        data = json.dumps({"cumulative_negative": count})
+        await r.setex(key, SENTIMENT_TTL, data)
+    except Exception as e:
+        logger.warning("async_save_sentiment_failed", error=str(e), session_id=session_id)

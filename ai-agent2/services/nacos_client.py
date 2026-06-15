@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 def _detect_local_ip(nacos_server: str) -> str:
-
+    """自动检测本机 IP（用于 Nacos 注册）。空地址时返回 127.0.0.1"""
+    if not nacos_server:
+        return "127.0.0.1"
     try:
         host, port = nacos_server.rsplit(":", 1)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:

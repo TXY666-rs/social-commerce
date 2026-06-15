@@ -208,7 +208,7 @@ import type { Product, ProductUpdate, ProductCreate } from '@/types'
 import { resolveImageUrl, resolveImageUrls, joinImageUrls, parseRawImages, getProductImageUrl } from '@/utils/image'
 import { getCookie } from '@/utils/cookie'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:9000/api'
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
 const uploadAction = `${apiBaseUrl}/upload/image`
 const uploadHeaders = computed(() => {
   const token = getCookie('token') || localStorage.getItem('token')

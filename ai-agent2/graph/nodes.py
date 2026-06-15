@@ -40,13 +40,12 @@ WM_TOOL_ARG_MAP = {
     "check_refund_status": {"refund_id": "refund_id"},
     "track_logistics":  {"order_id": "order_id"},
     "get_my_orders":    {"productKeyword": "product_keyword"},
-    "claim_coupon":     {"coupon_id": "coupon_id"},
 }
 
 # 调用成功后自动标记任务完成的工具（执行类操作）
 WM_COMPLETION_TOOLS = {
     "cancel_order", "request_refund", "request_return",
-    "submit_complaint", "cancel_refund", "remind_delivery", "claim_coupon",
+    "submit_complaint", "cancel_refund", "remind_delivery",
 }
 
 
@@ -166,7 +165,7 @@ def route_after_agent(state: AgentState) -> str:
     if state.get("last_error"):
         if state.get("is_fatal_error"):
             return "error_handler"
-        if state.get("retry_count", 0) < 2:
+        if state.get("retry_count", 0) < 3:
             return "mark_failed"
         return "error_handler"
     last_message = state["messages"][-1]

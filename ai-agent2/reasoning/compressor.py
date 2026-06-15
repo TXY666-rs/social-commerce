@@ -6,11 +6,11 @@
     把长输出压缩后再喂给 LLM，减少 token 消耗。
 
 压缩策略：
-    列表类（get_my_orders, search_products, get_my_coupons）：
+    列表类（get_my_orders）：
         → 截断到前 3 条 + 末尾加"共N条，显示前3条"
     详情类（get_goods_detail, track_logistics）：
         → 去掉空字段和多余空行
-    结果类（cancel_order, request_refund, claim_coupon）：
+    结果类（cancel_order, request_refund）：
         → 不压缩（本来就短）
 
 关键约束：
@@ -84,7 +84,7 @@ def _try_list_compress(lines: list[str]) -> str:
 
     序号行特征：
     - 【1】/ 【2】（get_my_orders 格式）
-    - 1. / 2. / 3.（search_products 格式）
+    - 1. / 2. / 3.（通用列表格式）
     - - 第1条 / - 第2条
     """
     # 识别序号行的正则

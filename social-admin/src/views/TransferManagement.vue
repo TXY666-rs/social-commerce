@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { getCookie } from '@/utils/cookie'
 import {
   getPendingTransfers,
   getTransferDetail,
   acceptTransfer,
   replyToUser,
   completeTransfer,
+  clearAllTransfers,
   type TransferTicket,
   type TransferDetail,
 } from '@/api/ai-agent'
@@ -18,6 +20,9 @@ const replyContent = ref('')
 const replying = ref(false)
 const detailLoading = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let transferSseAbort: AbortController | null = null
+// 独立 chatMessages：getTransferDetail 拉历史 → 启动 SSE 推增量
+const chatMessages = ref<Array<{ role: string; content: string; source?: string; timestamp?: number }>>([])
 
 async function loadTickets() {
   try {
@@ -28,11 +33,40 @@ async function loadTickets() {
   }
 }
 
+async function clearTickets() {
+  try {
+    await ElMessageBox.confirm('确认清空所有转人工工单？此操作不可恢复。', '清空工单', {
+      confirmButtonText: '确认清空',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    const result = await clearAllTransfers()
+    tickets.value = []
+    selectedTicket.value = null
+    ElMessage.success(`已清空 ${result.cleared} 条工单记录`)
+  } catch {
+    // 取消或失败
+  }
+}
+
 async function openDetail(ticket: TransferTicket) {
   detailLoading.value = true
+  disconnectTransferStream()
+  chatMessages.value = []
   try {
     selectedTicket.value = await getTransferDetail(ticket.id)
-  } catch (e) {
+    // 待处理或服务中的工单 → 加载历史 + 连接 SSE 实时收用户消息
+    // （pending 阶段也连，让客服在接听前就能看到用户后续输入）
+    if (selectedTicket.value?.ticket.status === 'accepted' || selectedTicket.value?.ticket.status === 'pending') {
+      chatMessages.value = (selectedTicket.value.recent_messages || []).map(m => ({
+        role: m.role,
+        content: m.content,
+        source: (m as any).source,
+        timestamp: (m as any).timestamp ? Number((m as any).timestamp) * 1000 : undefined,
+      }))
+      connectTransferStream(ticket.id)
+    }
+  } catch {
     ElMessage.error('获取工单详情失败')
   } finally {
     detailLoading.value = false
@@ -46,6 +80,15 @@ async function handleAccept() {
     await acceptTransfer(selectedTicket.value.ticket.id)
     ElMessage.success('已接听')
     selectedTicket.value.ticket.status = 'accepted'
+    // 重新拉详情 + 启动 SSE
+    selectedTicket.value = await getTransferDetail(selectedTicket.value.ticket.id)
+    chatMessages.value = (selectedTicket.value.recent_messages || []).map(m => ({
+      role: m.role,
+      content: m.content,
+      source: (m as any).source,
+      timestamp: (m as any).timestamp ? Number((m as any).timestamp) * 1000 : undefined,
+    }))
+    connectTransferStream(selectedTicket.value.ticket.id)
     await loadTickets()
   } catch {
     ElMessage.error('接听失败')
@@ -56,17 +99,97 @@ async function handleAccept() {
 
 async function handleReply() {
   if (!selectedTicket.value || !replyContent.value.trim()) return
+  const content = replyContent.value.trim()
+  const ticketId = selectedTicket.value.ticket.id
+  // 乐观追加到本地（避免等 SSE 推回自己）
+  chatMessages.value.push({
+    role: 'assistant',
+    content,
+    source: 'human_agent',
+    timestamp: Date.now(),
+  })
+  replyContent.value = ''
   replying.value = true
   try {
-    await replyToUser(selectedTicket.value.ticket.id, replyContent.value.trim())
-    ElMessage.success('回复已发送')
-    // 刷新聊天记录
-    selectedTicket.value = await getTransferDetail(selectedTicket.value.ticket.id)
-    replyContent.value = ''
+    await replyToUser(ticketId, content)
   } catch {
     ElMessage.error('回复失败')
+    chatMessages.value.pop()
   } finally {
     replying.value = false
+  }
+}
+
+// ── SSE 实时收用户消息（Pub/Sub 推过来的帧） ──
+const AI_AGENT_BASE_URL = (import.meta as any).env.VITE_AI_AGENT_URL || 'http://localhost:9000/api/ai'
+
+function connectTransferStream(transferId: string) {
+  if (transferSseAbort) return
+  const token = getCookie('token') || localStorage.getItem('token')
+  if (!token) return
+  transferSseAbort = new AbortController()
+  const url = `${AI_AGENT_BASE_URL}/admin/transfer/${encodeURIComponent(transferId)}/stream?token=${encodeURIComponent(token)}`
+  // Gateway 全局 JWT 鉴权需要 Authorization 头
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
+  fetch(url, { signal: transferSseAbort.signal, headers }).then(async (resp) => {
+    if (!resp.ok) {
+      console.error('[SSE] 连接失败:', resp.status, resp.statusText)
+      transferSseAbort = null
+      return
+    }
+    const reader = resp.body?.getReader()
+    if (!reader) {
+      console.error('[SSE] 无法获取响应流 reader')
+      return
+    }
+    console.log('[SSE] 连接建立成功, transferId:', transferId)
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const msg = JSON.parse(line.slice(6))
+          if (msg.type === 'connected') {
+            console.log('[SSE] 服务端确认连接')
+          } else if (msg.type === 'message' && msg.role === 'user') {
+            const msgTs = Number(msg.timestamp || 0) * 1000
+            // 严格去重（timestamp + content）
+            const exists = chatMessages.value.some(m =>
+              m.content === (msg.content || '') && (m.timestamp ?? 0) === msgTs
+            )
+            if (!exists) {
+              chatMessages.value.push({
+                role: 'user',
+                content: msg.content || '',
+                source: 'user',
+                timestamp: msgTs,
+              })
+            }
+          } else if (msg.type === 'status' && msg.status === 'completed') {
+            disconnectTransferStream()
+            loadTickets()
+            return
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  }).catch((err) => {
+    if (err?.name !== 'AbortError') {
+      console.error('[SSE] 连接异常:', err)
+    }
+  }).finally(() => { transferSseAbort = null })
+}
+
+function disconnectTransferStream() {
+  if (transferSseAbort) {
+    transferSseAbort.abort()
+    transferSseAbort = null
   }
 }
 
@@ -96,7 +219,7 @@ function formatTime(ts: number) {
 }
 
 function statusLabel(status: string) {
-  const map: Record<string, string> = { pending: '待处理', accepted: '服务中', completed: '已完成' }
+  const map: Record<string, string> = { pending: '待接听', accepted: '正在处理', completed: '已完成' }
   return map[status] || status
 }
 
@@ -112,6 +235,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  disconnectTransferStream()
 })
 </script>
 
@@ -121,10 +245,15 @@ onUnmounted(() => {
     <div class="ticket-list">
       <div class="list-header">
         <span class="title">转人工队列</span>
-        <el-tag type="warning" size="small">{{ tickets.length }} 待处理</el-tag>
+        <div class="header-actions">
+          <el-tag type="warning" size="small">{{ tickets.length }} 待接听</el-tag>
+          <el-button v-if="tickets.length > 0" type="danger" size="small" plain @click="clearTickets">
+            清空队列
+          </el-button>
+        </div>
       </div>
       <div v-if="tickets.length === 0" class="empty-hint">
-        暂无待处理的转接工单
+        暂无待接听的转接工单
       </div>
       <div
         v-for="ticket in tickets"
@@ -189,11 +318,11 @@ onUnmounted(() => {
           <pre class="summary-text">{{ selectedTicket.ticket.summary }}</pre>
         </div>
 
-        <!-- 聊天记录 -->
+        <!-- 聊天记录（实时更新：getTransferDetail 初始化 + SSE 推增量） -->
         <div class="chat-messages">
           <div
-            v-for="(msg, idx) in selectedTicket.recent_messages"
-            :key="idx"
+            v-for="(msg, idx) in chatMessages"
+            :key="(msg.timestamp ?? 0) + '-' + idx"
             class="chat-msg"
             :class="msg.role"
           >
@@ -250,6 +379,12 @@ onUnmounted(() => {
     .title {
       font-weight: 600;
       color: var(--text-primary);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
   }
 

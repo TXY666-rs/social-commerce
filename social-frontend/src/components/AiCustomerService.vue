@@ -39,6 +39,13 @@
 
         <!-- Messages -->
         <div v-else ref="messagesRef" class="ai-cs-messages" @click="onMessageClick">
+          <!-- 转人工提示条 -->
+          <div v-if="transferStatus !== 'none'" class="transfer-banner">
+            <el-icon :size="14"><Promotion /></el-icon>
+            <span v-if="transferStatus === 'pending'">已转接人工客服，正在为您接入...</span>
+            <span v-else>正在与人工客服对话中，AI 已暂停响应</span>
+          </div>
+
           <div v-if="messages.length === 0" class="welcome">
             <el-icon :size="40" color="var(--text-ghost)"><Monitor /></el-icon>
             <p>你好！有什么可以帮你的？</p>
@@ -49,15 +56,16 @@
 
           <div v-for="(msg, idx) in messages" :key="idx" class="msg-row" :class="msg.role">
             <template v-if="msg.role === 'assistant'">
-              <el-avatar :size="28" class="msg-ai-avatar" aria-label="AI客服头像">
-                <el-icon :size="14"><Monitor /></el-icon>
+              <el-avatar :size="28" :class="msg.source === 'human' ? 'msg-human-avatar' : 'msg-ai-avatar'" :aria-label="msg.source === 'human' ? '人工客服头像' : 'AI客服头像'">
+                <el-icon :size="14"><Monitor v-if="msg.source !== 'human'" /><Promotion v-else /></el-icon>
               </el-avatar>
               <div class="msg-bubble-wrapper">
-                <div class="msg-bubble ai-bubble" role="article" :aria-label="'AI回复: ' + msg.content.slice(0, 50)">
+                <span v-if="msg.source === 'human'" class="msg-source-tag">人工客服</span>
+                <div class="msg-bubble" :class="msg.source === 'human' ? 'human-bubble' : 'ai-bubble'" role="article" :aria-label="(msg.source === 'human' ? '人工客服: ' : 'AI回复: ') + msg.content.slice(0, 50)">
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
                 </div>
                 <!-- A4: 反馈按钮（仅非空回复显示） -->
-                <div v-if="msg.content && msg.content.length > 5 && !msg.isSystem" class="msg-feedback">
+                <div v-if="msg.content && msg.content.length > 5 && !msg.isSystem && msg.source !== 'human'" class="msg-feedback">
                   <button
                     class="fb-btn"
                     :class="{ active: msg.feedback === 'up' }"
@@ -116,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, computed, onBeforeUnmount, watch } from 'vue'
+import { ref, nextTick, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import {
@@ -126,6 +134,7 @@ import {
   checkAiAgentHealth,
   getAiAgentHistory,
   submitAiFeedback,
+  getTransferStatus,
   type AiAgentMessage
 } from '@/api/ai-agent'
 import { Monitor, Delete, Close, Promotion, Loading, WarningFilled } from '@element-plus/icons-vue'
@@ -136,15 +145,26 @@ const router = useRouter()
 
 // --- State ---
 const isOpen = ref(false)
-const messages = ref<(AiAgentMessage & { feedback?: 'up' | 'down'; feedbackSubmitting?: boolean; isSystem?: boolean })[]>([])
+const messages = ref<(AiAgentMessage & { feedback?: 'up' | 'down'; feedbackSubmitting?: boolean; isSystem?: boolean; source?: 'human' | 'ai' })[]>([])
 const inputText = ref('')
 const isLoading = ref(false)
 const messagesRef = ref<HTMLElement>()
 const isServiceAvailable = ref(true)
+// 转人工状态：none / pending / accepted（控制 UI 提示条 + 输入框文案）
+const transferStatus = ref<'none' | 'pending' | 'accepted'>('none')
 const isChecking = ref(false)
 const isMobile = ref(window.innerWidth <= 768)
 let currentController: AbortController | null = null
 let currentSessionId: string | null = null
+let transferWaitController: AbortController | null = null
+// 主动断开标志：watch(isOpen=false) / 切账号 / 状态变 none 时置 true，
+// 防止 SSE 断开后 finally 块无限重连
+let isManualDisconnect = true
+// 转人工状态轮询 timer：兜底感知转人工状态变化（用户可能没开聊天窗）
+let transferPollTimer: ReturnType<typeof setTimeout> | null = null
+// 轮询间隔：无转人工时 15s（省请求），pending/accepted 时 5s（快感知）
+const POLL_IDLE_MS = 15000
+const POLL_ACTIVE_MS = 5000
 
 async function ensureSessionId(): Promise<string> {
   if (currentSessionId) return currentSessionId
@@ -236,14 +256,110 @@ async function loadHistory() {
   }
 }
 
+// 连接 /chat/transfer-wait SSE 长连接，接收管理员消息（Pub/Sub 推送）
+async function connectTransferStream() {
+  if (transferWaitController) return
+  isManualDisconnect = false
+  try {
+    const sid = await ensureSessionId()
+    const tk = userStore.token || ''
+    transferWaitController = new AbortController()
+    // 后端 ai-agent 端点用 query token；Gateway 全局 JWT 用 Authorization 头
+    const url = `${import.meta.env.VITE_AI_AGENT_URL ?? 'http://localhost:8000'}/chat/transfer-wait?session_id=${encodeURIComponent(sid)}&token=${encodeURIComponent(tk)}`
+    const headers: Record<string, string> = {}
+    if (tk) headers['Authorization'] = `Bearer ${tk}`
+    const resp = await fetch(url, { signal: transferWaitController.signal, headers })
+    const reader = resp.body?.getReader()
+    if (!reader) return
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.content) {
+            const msgTs = Number(data.timestamp ?? 0) * 1000 || Date.now()
+            // 严格去重（timestamp + content），防止重连 / 历史补齐 / 重复推送
+            const exists = messages.value.some(m => m.content === data.content && Number(m.timestamp ?? 0) === msgTs)
+            if (!exists) {
+              messages.value.push({
+                role: 'assistant',
+                content: data.content,
+                timestamp: msgTs,
+                source: 'human',   // 标识为人工客服消息（区别于 AI）
+              })
+              scrollToBottom()
+            }
+          }
+          if (data.done) {
+            transferWaitController = null
+            return
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore abort */ }
+  transferWaitController = null
+  // 异常断开：仅在非主动断开时 1s 重连
+  if (!isManualDisconnect) {
+    setTimeout(() => connectTransferStream(), 1000)
+  }
+}
+
+function disconnectTransferStream() {
+  isManualDisconnect = true
+  if (transferWaitController) {
+    transferWaitController.abort()
+    transferWaitController = null
+  }
+}
+
+// 检查转人工状态；处于 pending/accepted 时建立 SSE 连接
+// 同时作为定时轮询的入口，根据状态自适应调整下次轮询间隔
+async function checkTransfer() {
+  if (!userStore.userInfo?.id) {
+    scheduleNextPoll(POLL_IDLE_MS)
+    return
+  }
+  try {
+    const r = await getTransferStatus(userStore.userInfo.id)
+    const s = (r.status as any) || 'none'
+    transferStatus.value = s
+    if (s === 'pending' || s === 'accepted') {
+      // 转人工中：建立 SSE 实时通道，并用较短间隔轮询兜底
+      if (!transferWaitController) connectTransferStream()
+      scheduleNextPoll(POLL_ACTIVE_MS)
+    } else {
+      // 无转人工：断开 SSE，拉长轮询间隔
+      disconnectTransferStream()
+      scheduleNextPoll(POLL_IDLE_MS)
+    }
+  } catch {
+    // 静默失败，按较慢间隔重试
+    scheduleNextPoll(POLL_IDLE_MS)
+  }
+}
+
+// 自适应调度下次轮询（避免多个 timer 叠加）
+function scheduleNextPoll(ms: number) {
+  if (transferPollTimer) clearTimeout(transferPollTimer)
+  transferPollTimer = setTimeout(() => checkTransfer(), ms)
+}
+
 watch(isOpen, async (val) => {
-  console.log(`[AiCS] isOpen 变化: ${val}, 即将调用 ${val ? 'checkHealth+loadHistory' : '(关闭)'}`)
+  console.log(`[AiCS] isOpen 变化: ${val}, 即将调用 ${val ? 'checkHealth+loadHistory+checkTransfer' : '(关闭)'}`)
   if (val) {
-    // health check 和 history 并行执行，互不阻塞
-    // health check 失败不影响 history 加载（history 成功会反哺 isServiceAvailable）
     checkHealth()
     await loadHistory()
-    console.log('[AiCS] loadHistory() 完成')
+    await checkTransfer()
+  } else {
+    disconnectTransferStream()
   }
 })
 
@@ -372,16 +488,27 @@ async function handleSend() {
     token,
     (chunk: string) => {
       messages.value[aiIdx].content += chunk
-      // 检测转人工标记
-      if (messages.value[aiIdx].content.includes('[[TRANSFER_TO_HUMAN]]')) {
+      // 检测转人工标记：后端 transfer_tool 实际返回"转接单号: xxx"字样
+      if (messages.value[aiIdx].content.includes('转接单号')) {
         transferDetected = true
-        messages.value[aiIdx].content = messages.value[aiIdx].content.replace('[[TRANSFER_TO_HUMAN]]', '').trim()
+      }
+      // 检测人工通道标记：转人工期间后端返回 [HUMAN_TRANSFER] 前缀
+      if (messages.value[aiIdx].content.includes('[HUMAN_TRANSFER]')) {
+        messages.value[aiIdx].source = 'human'
+        messages.value[aiIdx].content = messages.value[aiIdx].content.replace('[HUMAN_TRANSFER]', '').trim()
       }
       scrollToBottom()
     },
-    () => {
+    (_sid: string, humanTransfer?: boolean) => {
       isLoading.value = false
       currentController = null
+      if (humanTransfer) {
+        // 转人工阻断：后端未产生 AI 回复，移除占位气泡，不补兜底文案。
+        // 用户消息已由后端写入会话历史并通过 transfer-wait SSE 转发给人工客服。
+        messages.value.splice(aiIdx, 1)
+        checkTransfer()
+        return
+      }
       if (transferDetected) {
         // 显示转人工系统消息
         messages.value.push({
@@ -389,6 +516,8 @@ async function handleSend() {
           content: '正在为您转接人工客服，请稍候...',
           timestamp: Date.now()
         })
+        // 立即触发 SSE 连接建立 + 加快轮询，不再等用户开关聊天窗
+        checkTransfer()
       } else if (!messages.value[aiIdx].content) {
         messages.value[aiIdx].content = '抱歉，我暂时无法回答这个问题。'
       }
@@ -453,11 +582,23 @@ async function clearChat() {
   }
 }
 
+onMounted(() => {
+  // 启动转人工状态轮询（兜底感知，即使聊天窗未开也能检测到状态变化）
+  // 首次延迟 3s 启动，避开页面加载高峰
+  transferPollTimer = setTimeout(() => checkTransfer(), 3000)
+})
+
 onBeforeUnmount(() => {
   isDragging.value = false
   if (currentController) {
     currentController.abort()
     currentController = null
+  }
+  disconnectTransferStream()
+  // 清理转人工轮询 timer
+  if (transferPollTimer) {
+    clearTimeout(transferPollTimer)
+    transferPollTimer = null
   }
   window.removeEventListener('resize', onResize)
 })
@@ -655,6 +796,50 @@ onBeforeUnmount(() => {
     flex-shrink: 0;
     background: var(--bg-card);
     color: #fff;
+  }
+
+  // 人工客服头像（区别于 AI）
+  .msg-human-avatar {
+    flex-shrink: 0;
+    background: #e6a23c;
+    color: #fff;
+  }
+
+  // 人工客服来源标签
+  .msg-source-tag {
+    font-size: 11px;
+    color: #e6a23c;
+    padding: 0 0 2px 4px;
+    font-weight: 500;
+  }
+
+  // 人工客服气泡（暖色调，区别于 AI 的冷色调）
+  .human-bubble {
+    background: #fdf6ec !important;
+    border: 1px solid #f5dab1;
+    color: #7a5c2e;
+  }
+
+  // 转人工顶部提示条
+  .transfer-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, #fdf6ec, #fef0f0);
+    border: 1px solid #f5dab1;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #e6a23c;
+    text-align: center;
+    justify-content: center;
+    animation: pulse-banner 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-banner {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
   }
 
   .msg-bubble-wrapper {

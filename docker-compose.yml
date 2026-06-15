@@ -1,0 +1,91 @@
+# ============================================================
+# AI 智能客服 Agent —— 极简一键启动
+# ============================================================
+# 只需 3 个容器：Redis + AI Agent + 前端
+#
+# 用法:
+#   1. cp ai-agent2/.env.example ai-agent2/.env  填入 OPENAI_API_KEY
+#   2. docker compose up -d --build
+#   3. 浏览器打开 http://localhost
+#
+# 首次构建约 3-5 分钟（npm install + pip install），
+# 后续启动秒级。
+# ============================================================
+
+name: ai-agent
+
+services:
+
+  # ── Redis：记忆 / Skill 状态 / Mock 业务数据 / 转人工队列 ──
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [agent-net]
+
+  # ── AI Agent 核心：LangGraph ReAct + 多 Skill + 流式输出 ──
+  ai-agent:
+    build:
+      context: ./ai-agent2
+      dockerfile: Dockerfile
+    image: ai-agent:latest
+    container_name: ai-agent-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./ai-agent2/.env
+    environment:
+      # 容器内通过服务名访问 Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [agent-net]
+
+  # ── 前端：Agent Demo 页（nginx 静态服务）──
+  frontend:
+    build:
+      context: ./social-frontend
+      dockerfile: Dockerfile
+    image: ai-agent-frontend:latest
+    container_name: ai-agent-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - ai-agent
+    networks: [agent-net]
+
+  # ── 管理后台（可选）：转人工管理 + 质量监控 ──
+  admin:
+    build:
+      context: ./social-admin
+      dockerfile: Dockerfile
+    image: ai-agent-admin:latest
+    container_name: ai-agent-admin
+    restart: unless-stopped
+    ports:
+      - "81:80"
+    profiles: ["full"]   # docker compose --profile full up 才启动
+    depends_on:
+      - ai-agent
+    networks: [agent-net]
+
+volumes:
+  redis_data:
+
+networks:
+  agent-net:
+    driver: bridge

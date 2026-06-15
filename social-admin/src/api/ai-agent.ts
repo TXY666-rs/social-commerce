@@ -167,6 +167,26 @@ export async function clearAiAgentSession(sessionId: string): Promise<void> {
 // Admin Dashboard API
 // ============================================================
 
+export interface LlmModel {
+  level: number
+  name: string
+  active: boolean
+}
+
+export interface LlmStatus {
+  current_model: string
+  is_healthy: boolean
+  fallback_level: number
+  total_models: number
+  seconds_since_fallback: number | null
+  models: LlmModel[]
+}
+
+export interface ModelUsage {
+  name: string
+  count: number
+}
+
 export interface AiAgentDashboard {
   today: {
     conversations: number
@@ -192,6 +212,8 @@ export interface AiAgentDashboard {
     success: number
     fail: number
   }
+  llm_status: LlmStatus | null
+  model_usage: ModelUsage[]
   conversations_detail: Array<{
     user_id: string
     input_tokens: number
@@ -199,6 +221,7 @@ export interface AiAgentDashboard {
     total_tokens: number
     duration_ms: number
     agent: string
+    model?: string
     time: string
   }>
   tool_details: Array<{
@@ -222,6 +245,33 @@ export async function getAiAgentDashboard(): Promise<AiAgentDashboard> {
   })
   if (!res.ok) throw new Error('获取AI客服数据失败')
   return res.json()
+}
+
+/** 手动切换 LLM 模型级别 */
+export async function switchLlm(level: number): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = readAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${AI_AGENT_BASE_URL}/admin/llm/switch`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ level }),
+    signal: AbortSignal.timeout(5000)
+  })
+  if (!res.ok) throw new Error('切换模型失败')
+}
+
+/** 重置 LLM 到主力模型 */
+export async function resetLlm(): Promise<void> {
+  const headers: Record<string, string> = {}
+  const token = readAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${AI_AGENT_BASE_URL}/admin/llm/reset`, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.timeout(5000)
+  })
+  if (!res.ok) throw new Error('重置模型失败')
 }
 
 
@@ -309,6 +359,20 @@ export async function completeTransfer(transferId: string): Promise<void> {
     signal: AbortSignal.timeout(5000)
   })
   if (!res.ok) throw new Error('完成转接失败')
+}
+
+/** 清空所有转人工工单（队列 + 详情 + 标记） */
+export async function clearAllTransfers(): Promise<{ cleared: number }> {
+  const headers: Record<string, string> = {}
+  const token = readAuthToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(`${AI_AGENT_BASE_URL}/admin/transfer/clear`, {
+    method: 'DELETE',
+    headers,
+    signal: AbortSignal.timeout(5000)
+  })
+  if (!res.ok) throw new Error('清空工单失败')
+  return res.json()
 }
 
 

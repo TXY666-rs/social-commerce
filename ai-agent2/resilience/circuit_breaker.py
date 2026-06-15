@@ -10,20 +10,12 @@
     OPEN（熔断）→ 冷却时间到 → HALF_OPEN（半开）
     HALF_OPEN（半开）→ 探测成功 → CLOSED（恢复）
     HALF_OPEN（半开）→ 探测失败 → OPEN（再次熔断）
-
-面试要点：
-    - 为什么需要熔断？避免一个下游服务故障拖垮整个调用链
-    - 与重试的区别？重试是"同一个请求多次尝试"，熔断是"多个请求共享故障状态"
-    - 半开状态的作用？避免服务恢复后被大量请求瞬间打垮
-    - 为什么抛异常而非返回兜底？让 LLM 看到错误后自主调整策略（自纠错）
 """
 
 import time
 import threading
 import structlog
-
 logger = structlog.get_logger(__name__)
-
 
 class CircuitBreakerOpenError(Exception):
     """熔断器打开时抛出的异常，由 ToolNode 捕获后转给 LLM 自纠错"""
@@ -165,6 +157,8 @@ class CircuitBreaker:
 # ============================================================
 
 _breakers: dict[str, CircuitBreaker] = {}
+_breakers_lock = threading.Lock()
+_MAX_BREAKERS = 100  # 最多追踪的工具数量
 
 
 def get_circuit_breaker(
@@ -172,16 +166,31 @@ def get_circuit_breaker(
     failure_threshold: int = 5,
     cooldown_seconds: float = 30.0,
 ) -> CircuitBreaker:
-    """获取或创建指定工具的熔断器（单例模式）"""
-    if name not in _breakers:
-        _breakers[name] = CircuitBreaker(
-            name=name,
-            failure_threshold=failure_threshold,
-            cooldown_seconds=cooldown_seconds,
-        )
-    return _breakers[name]
+    """获取或创建指定工具的熔断器（线程安全单例模式）"""
+    with _breakers_lock:
+        if name not in _breakers:
+            # 超限时移除最久未活跃的熔断器
+            if len(_breakers) >= _MAX_BREAKERS:
+                _evict_stale_breakers()
+            _breakers[name] = CircuitBreaker(
+                name=name,
+                failure_threshold=failure_threshold,
+                cooldown_seconds=cooldown_seconds,
+            )
+        return _breakers[name]
+
+
+def _evict_stale_breakers():
+    """移除已恢复正常且长时间未触发的熔断器"""
+    stale = [n for n, cb in _breakers.items()
+             if cb.state == CircuitState.CLOSED and cb._failure_count == 0]
+    for n in stale[:len(stale) // 2 + 1]:  # 移除一半已恢复的
+        del _breakers[n]
+    if stale:
+        logger.debug("breakers_evicted", count=len(stale))
 
 
 def get_all_breakers() -> dict[str, dict]:
     """获取所有熔断器的状态（供管理 API 使用）"""
-    return {name: cb.get_status() for name, cb in _breakers.items()}
+    with _breakers_lock:
+        return {name: cb.get_status() for name, cb in _breakers.items()}

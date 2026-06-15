@@ -25,6 +25,7 @@ class ChatResponse(BaseModel):
     route_source: str = ""           # 路由来源
     skill_name: str = ""             # 触发的 Skill 名称（仅 Skill 路由时有值）
     eval: EvalInfo = EvalInfo()      # 单次请求评估信息
+    messages: list[dict] = []        # 转人工模式时返回完整会话历史，供前端实时同步
 
 
 class MessageHistory(BaseModel):

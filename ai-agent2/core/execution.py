@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 import structlog
 
 from graph.graph import build_react_graph
-from resilience.llm_factory import get_llm, LLMFallbackException
+from resilience.llm_factory import get_llm, get_current_model_name, LLMFallbackException
 from agents.tools.constants import ERROR_KEYWORDS
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +109,7 @@ async def execute_graph_with_retry(context: dict, session_id: str, user_id: str)
 
     # ── 记录运营统计 ──
     duration_ms = (time.monotonic() - t_start) * 1000
+    current_model = get_current_model_name()
     try:
         from monitoring.dashboard import record_chat as _record, record_conversation_detail as _detail
         asyncio.create_task(_record(
@@ -119,6 +120,7 @@ async def execute_graph_with_retry(context: dict, session_id: str, user_id: str)
             tool_errors=list(tool_errors_made) if tool_errors_made else None,
             sentiment=context["sentiment_level"],
             transfer=transfer_triggered,
+            model_name=current_model,
         ))
         asyncio.create_task(_detail(
             user_id or "anonymous",
@@ -126,6 +128,7 @@ async def execute_graph_with_retry(context: dict, session_id: str, user_id: str)
             total_output_tokens,
             duration_ms,
             "agent",
+            model_name=current_model,
         ))
     except Exception:
         pass
@@ -137,6 +140,7 @@ async def execute_graph_with_retry(context: dict, session_id: str, user_id: str)
     context["_input_tokens"] = total_input_tokens
     context["_output_tokens"] = total_output_tokens
     context["_transfer"] = transfer_triggered
+    context["_model_name"] = current_model
 
     if transfer_triggered:
         yield "[[TRANSFER_TO_HUMAN]]"

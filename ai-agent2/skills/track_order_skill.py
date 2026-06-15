@@ -43,6 +43,8 @@ class TrackOrderSkill(BaseSkill):
                 f"【{i}】{item.get('productName', '未知商品')}"
                 f" ×{item.get('quantity', 1)}  ¥{item.get('totalPrice', 0)}  [{status}]"
             )
+            # 订单号（供后续取消/退款/改地址等操作使用）
+            line += f"\n   订单号: {item.get('id', '未知')}"
             # 时间信息
             time_parts = []
             if item.get("completeTime"):

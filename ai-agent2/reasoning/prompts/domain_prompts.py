@@ -43,7 +43,7 @@ _UNIFIED_KEYS = {"tools_hints", "flow", "data_integrity", "confirmation",
 def _build_unified_tool_hints() -> str:
     """合并所有领域的工具说明文本（排除 cross_domain 跨域切换指引）"""
     all_parts = []
-    for domain in ["order", "product", "after_sale", "coupon"]:
+    for domain in ["order", "after_sale"]:
         data = load_domain(domain)
         domain_parts = []
         for key in _UNIFIED_KEYS:

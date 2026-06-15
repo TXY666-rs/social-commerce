@@ -51,18 +51,6 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
-      path: '/activity',
-      name: 'activity',
-      component: () => import('@/views/Activity.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
-      path: '/my-coupons',
-      name: 'my-coupons',
-      component: () => import('@/views/MyCoupons.vue'),
-      meta: { requiresAuth: true }
-    },
-    {
       path: '/addresses',
       name: 'addresses',
       component: () => import('@/views/Addresses.vue'),

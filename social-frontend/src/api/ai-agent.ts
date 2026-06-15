@@ -1,8 +1,9 @@
 import { getCookie } from '@/utils/cookie'
 
-const AI_AGENT_BASE_URL = import.meta.env.VITE_AI_AGENT_URL || 'http://localhost:8000'
+// Agent base URL: empty in production (same-origin via nginx), direct in dev
+const AI_AGENT_BASE_URL = import.meta.env.VITE_AI_AGENT_URL ?? 'http://localhost:8000'
 
-/** 安全读取 token：Cookie 优先 → localStorage 降级 */
+/** Read auth token: Cookie first, then localStorage fallback */
 function readAuthToken(fallback?: string): string | null {
   return fallback || getCookie('token') || localStorage.getItem('token')
 }
@@ -18,7 +19,7 @@ export interface ChatResponse {
   session_id: string
 }
 
-/** Generate a session ID from user info（需登录后调用） */
+/** Generate a session ID from user info */
 export function generateSessionId(userId: number | string): string {
   return `user_${userId}`
 }
@@ -59,20 +60,20 @@ export async function sendAiAgentMessage(
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(text || `请求失败: ${res.status}`)
+    throw new Error(text || `request failed: ${res.status}`)
   }
   return res.json()
 }
 
 /**
- * SSE 流式调用 ai-agent
+ * SSE streaming call to ai-agent
  */
 export function streamAiAgentMessage(
   message: string,
   sessionId: string,
   token: string | undefined,
   onChunk: (text: string) => void,
-  onDone: (sessionId: string) => void,
+  onDone: (sessionId: string, humanTransfer?: boolean) => void,
   onError: (error: Error) => void
 ): AbortController {
   const controller = new AbortController()
@@ -91,15 +92,29 @@ export function streamAiAgentMessage(
     .then(async (response) => {
       if (!response.ok) {
         const text = await response.text().catch(() => '')
-        throw new Error(text || `请求失败: ${response.status}`)
+        throw new Error(text || `request failed: ${response.status}`)
       }
 
       const reader = response.body?.getReader()
-      if (!reader) throw new Error('无法读取响应流')
+      if (!reader) throw new Error('cannot read response stream')
 
       const decoder = new TextDecoder()
       let buffer = ''
       let finalSessionId = sessionId
+      // 转人工阻断标记：后端转人工期间只发 human_transfer+done（无 AI content），
+      // 前端据此跳过空回复兜底文案，真正的人工回复由 transfer-wait SSE 推送。
+      let humanTransfer = false
+
+      const handleData = (data: any) => {
+        if (data.human_transfer) {
+          humanTransfer = true
+        }
+        if (data.done) {
+          finalSessionId = data.session_id || sessionId
+        } else if (data.content) {
+          onChunk(data.content)
+        }
+      }
 
       while (true) {
         const { done, value } = await reader.read()
@@ -114,12 +129,7 @@ export function streamAiAgentMessage(
           if (!trimmed || !trimmed.startsWith('data:')) continue
 
           try {
-            const data = JSON.parse(trimmed.slice(5).trim())
-            if (data.done) {
-              finalSessionId = data.session_id || sessionId
-            } else if (data.content) {
-              onChunk(data.content)
-            }
+            handleData(JSON.parse(trimmed.slice(5).trim()))
           } catch {
             // ignore parse errors
           }
@@ -130,19 +140,14 @@ export function streamAiAgentMessage(
         const trimmed = buffer.trim()
         if (trimmed.startsWith('data:')) {
           try {
-            const data = JSON.parse(trimmed.slice(5).trim())
-            if (data.done) {
-              finalSessionId = data.session_id || sessionId
-            } else if (data.content) {
-              onChunk(data.content)
-            }
+            handleData(JSON.parse(trimmed.slice(5).trim()))
           } catch {
             // ignore
           }
         }
       }
 
-      onDone(finalSessionId)
+      onDone(finalSessionId, humanTransfer)
     })
     .catch((err) => {
       if (err.name === 'AbortError') return
@@ -155,7 +160,6 @@ export function streamAiAgentMessage(
 /** Get chat history for a session */
 export async function getAiAgentHistory(sessionId: string): Promise<{ session_id: string; messages: Array<{ role: string; content: string; timestamp: string }> }> {
   const url = `${AI_AGENT_BASE_URL}/chat/history/${sessionId}`
-  console.log(`[AiCS-API] GET ${url}`)
   const headers: Record<string, string> = {}
   const authToken = readAuthToken()
   if (authToken) {
@@ -165,11 +169,8 @@ export async function getAiAgentHistory(sessionId: string): Promise<{ session_id
     headers,
     signal: AbortSignal.timeout(5000)
   })
-  console.log(`[AiCS-API] 响应状态: ${res.status} ${res.statusText}`)
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    console.error(`[AiCS-API] 响应体: "${text}"`)
-    throw new Error(`获取历史失败: ${res.status}`)
+    throw new Error(`load history failed: ${res.status}`)
   }
   return res.json()
 }
@@ -177,11 +178,11 @@ export async function getAiAgentHistory(sessionId: string): Promise<{ session_id
 /** Clear a chat session */
 export async function clearAiAgentSession(sessionId: string): Promise<void> {
   const res = await fetch(`${AI_AGENT_BASE_URL}/chat/clear/${sessionId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`清除会话失败: ${res.status}`)
+  if (!res.ok) throw new Error(`clear session failed: ${res.status}`)
 }
 
 // ============================================================
-// A4: 用户反馈 API
+// Feedback API
 // ============================================================
 
 export interface FeedbackPayload {
@@ -191,7 +192,7 @@ export interface FeedbackPayload {
   token?: string
 }
 
-/** 提交 AI 回复的 👍/👎 反馈 */
+/** Submit feedback for an AI reply */
 export async function submitAiFeedback(payload: FeedbackPayload): Promise<void> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const authToken = readAuthToken(payload.token)
@@ -203,5 +204,22 @@ export async function submitAiFeedback(payload: FeedbackPayload): Promise<void> 
     headers,
     body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error(`提交反馈失败: ${res.status}`)
+  if (!res.ok) throw new Error(`submit feedback failed: ${res.status}`)
+}
+
+// ============================================================
+// Transfer-to-human status API
+// ============================================================
+
+/** Check current transfer-to-human status for a user */
+export async function getTransferStatus(userId: number | string): Promise<{ status: string }> {
+  const headers: Record<string, string> = {}
+  const authToken = readAuthToken()
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`
+  }
+  const res = await fetch(`${AI_AGENT_BASE_URL}/chat/transfer-status/${userId}`, { headers })
+  if (!res.ok) return { status: 'none' }
+  const data = await res.json()
+  return { status: data.status || 'none' }
 }

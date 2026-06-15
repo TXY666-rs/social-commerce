@@ -146,16 +146,42 @@ class TokenBudget:
 # 全局管理器
 # ============================================================
 
-_budgets: dict[str, TokenBudget] = {}
+_budgets: dict[str, tuple[float, TokenBudget]] = {}  # session_id → (expire_at, budget)
+_BUDGET_TTL = 86400  # 24 小时无活动后淘汰
+_MAX_BUDGETS = 10000  # 最大条目数
+import time as _time
+import threading
+
+_budgets_lock = threading.Lock()
 
 
 def get_token_budget(session_id: str, budget: int = DEFAULT_BUDGET) -> TokenBudget:
-    """获取或创建指定会话的 Token 预算管理器"""
-    if session_id not in _budgets:
-        _budgets[session_id] = TokenBudget(session_id, budget)
-    return _budgets[session_id]
+    """获取或创建指定会话的 Token 预算管理器（TTL 淘汰 + 上限保护）"""
+    now = _time.monotonic()
+    with _budgets_lock:
+        if session_id in _budgets:
+            _, tb = _budgets[session_id]
+            _budgets[session_id] = (now + _BUDGET_TTL, tb)
+            return tb
+
+        # 超限时清理过期条目
+        if len(_budgets) >= _MAX_BUDGETS:
+            _cleanup_expired_budgets(now)
+
+        tb = TokenBudget(session_id, budget)
+        _budgets[session_id] = (now + _BUDGET_TTL, tb)
+        return tb
+
+
+def _cleanup_expired_budgets(now: float):
+    """清理过期的预算条目"""
+    expired = [k for k, (exp, _) in _budgets.items() if now >= exp]
+    for k in expired:
+        del _budgets[k]
+    if expired:
+        logger.debug("budget_cleanup", expired_count=len(expired), remaining=len(_budgets))
 
 
 def get_all_budgets() -> dict[str, dict]:
     """获取所有会话的预算统计（供管理 API 使用）"""
-    return {sid: b.get_stats() for sid, b in _budgets.items()}
+    return {sid: b.get_stats() for sid, (_, b) in _budgets.items()}

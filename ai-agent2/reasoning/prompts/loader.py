@@ -2,7 +2,7 @@
 
 加载顺序：
     1. base.yaml — 公共组件（persona, policies, tone, self_correction）
-    2. {domain}.yaml — 领域配置（order, product, after_sale, coupon）
+    2. {domain}.yaml — 领域配置（order, after_sale）
 
 缓存策略：
     - 文件级缓存：首次加载后缓存到 _cache，后续直接读缓存
@@ -81,7 +81,7 @@ def load_domain(domain: str) -> dict:
     """加载领域 Prompt 配置
 
     Args:
-        domain: 领域名称，如 "order", "product", "after_sale", "coupon"
+        domain: 领域名称，如 "order", "after_sale"
 
     Returns:
         dict: 领域配置，包含 tools_hints, flow, cross_domain 等

@@ -18,6 +18,7 @@ from datetime import date, datetime
 from typing import Optional
 import structlog
 from skills.base import BaseSkill, ParamDef, SkillState
+from skills.async_utils import async_http_call
 from agents.tools.orders_tool import _fetch_orders
 from agents.tools.after_sale_tool import _submit_refund_api, _submit_return_api
 
@@ -42,7 +43,7 @@ def _normalize_reason(reason: str) -> str:
 
 async def _validate_order_id(order_id: str, user_id: str) -> tuple[bool, str, str]:
     """验证订单是否存在，返回 (is_valid, order_id, error_msg)"""
-    orders = _fetch_orders()
+    orders = await async_http_call(_fetch_orders)
     if orders is None:
         return False, "", "查询订单时出现问题，请稍后重试。"
 
@@ -142,7 +143,7 @@ class ReturnItemSkill(BaseSkill):
         action_short = "退货" if is_return else "退款"
 
         # 获取订单详情
-        order_info = self._fetch_order_detail(order_id)
+        order_info = await async_http_call(self._fetch_order_detail, order_id)
         if not order_info:
             state.context["needs_confirm"] = False
             return "查询订单详情失败，请稍后重试或联系人工客服。"
@@ -262,17 +263,17 @@ class ReturnItemSkill(BaseSkill):
 
         order_info = state.context.get("order_info")
         if not order_info:
-            order_info = self._fetch_order_detail(order_id)
+            order_info = await async_http_call(self._fetch_order_detail, order_id)
             if not order_info:
                 return "查询订单详情失败，请稍后重试或联系人工客服。"
 
         # 未发货 → 退款
         delivery_time = order_info.get("deliveryTime", "")
         if not delivery_time:
-            return self._submit_refund(order_id, reason, order_info)
+            return await async_http_call(self._submit_refund, order_id, reason, order_info)
 
         # 已发货 → 退货退款
-        return self._submit_return(order_id, reason, order_info)
+        return await async_http_call(self._submit_return, order_id, reason, order_info)
 
     def _submit_refund(self, order_id: str, reason: str, order_info: dict) -> str:
         """提交退款申请（未发货）"""

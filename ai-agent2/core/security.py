@@ -20,31 +20,62 @@ logger = structlog.get_logger(__name__)
 # 1. Prompt 注入检测
 # ============================================================
 
+# 注入检测 — 评分制（降低误报率）
+# 每个匹配的模式贡献一个权重分，总分超过阈值才判定为注入
 INJECTION_PATTERNS = [
-    r"忽略.*(?:之前|上面|所有|以下).*指令",
-    r"ignore.*(?:previous|above|all|following).*instructions",
-    r"(?:系统|system)\s*(?:提示词|prompt|设定)",
-    r"你的.*(?:设定|角色|身份|指令).*是",
-    r"(?:假装|假设|扮演).*(?:你是|你是.*没有)",
-    r"输出.*(?:prompt|指令|设定|系统)",
-    r"(?:忘记|丢弃|抛弃).*(?:之前|上面|所有)",
-    r"你现在是.*(?:没有|不受).*(?:限制|约束|规则)",
-    r"(?:DAN|jailbreak|越狱)\s*(?:mode|模式)?",
-    r"(?:绕过|突破|解除).*(?:限制|规则|约束|安全)",
-    r"(?:无视|忽略).*(?:规则|限制|约束)",
+    # 高权重（明确攻击意图）
+    (r"ignore.*(?:previous|above|all|following).*instructions", 30),
+    (r"(?:DAN|jailbreak|越狱)\s*(?:mode|模式)?", 30),
+    (r"(?:绕过|突破|解除).*(?:限制|规则|约束|安全)", 25),
+    (r"你现在是.*(?:没有|不受).*(?:限制|约束|规则)", 25),
+    (r"(?:假装|假设|扮演).*(?:你是|你是.*没有)", 25),
+    (r"忽略.*(?:之前|上面|所有|以下).*指令", 25),
+    # 中权重（需要组合才可疑）
+    (r"(?:系统|system)\s*(?:提示词|prompt|设定)", 12),
+    (r"(?:忘记|丢弃|抛弃).*(?:之前|上面|所有)", 25),
+    (r"输出.*(?:prompt|指令|设定|系统)", 12),
+    # 低权重（单独出现可能是正常对话）
+    (r"你的.*(?:设定|角色|身份|指令).*是", 8),
+    (r"(?:无视|忽略).*(?:规则|限制|约束)", 8),
 ]
 
-_INJECTION_RE = re.compile("|".join(INJECTION_PATTERNS), re.IGNORECASE)
+# 评分阈值：总分 >= 此值判定为注入
+INJECTION_THRESHOLD = 20
+
+# 预编译正则（避免每次调用重新编译）
+_COMPILED_INJECTION_PATTERNS = [
+    (re.compile(pattern, re.IGNORECASE), weight)
+    for pattern, weight in INJECTION_PATTERNS
+]
 
 
 def detect_injection(message: str) -> bool:
-    """检测 Prompt 注入攻击
+    """检测 Prompt 注入攻击（评分制）
+
+    每个匹配模式贡献一个权重分，总分超过 INJECTION_THRESHOLD 才判定为注入。
+    这样单个低权重匹配（如 "你的角色是什么"）不会误报，
+    但多个组合（如 "忽略指令" + "你的角色是"）会触发。
 
     Returns:
         True: 检测到注入攻击
         False: 正常消息
     """
-    return bool(_INJECTION_RE.search(message))
+    score = 0
+    for pattern, weight in _COMPILED_INJECTION_PATTERNS:
+        if pattern.search(message):
+            score += weight
+            if score >= INJECTION_THRESHOLD:
+                return True
+    return False
+
+
+def get_injection_score(message: str) -> int:
+    """获取注入评分（供监控和调试使用）"""
+    score = 0
+    for pattern, weight in _COMPILED_INJECTION_PATTERNS:
+        if pattern.search(message):
+            score += weight
+    return score
 
 
 # ============================================================
@@ -57,7 +88,9 @@ def sanitize_output(reply: str) -> str:
     处理：
     - 移除内部注释标记 <!-- ... -->
     - 过滤过度承诺（保证、一定、肯定）
-    - 移除内部 ID 格式暴露
+
+    注意：订单号（order+数字）不再脱敏 —— 订单号需对用户可见，
+    否则 modify_order/return_item 等 skill 无法收集订单号参数。
     """
     if not reply:
         return reply
@@ -65,19 +98,16 @@ def sanitize_output(reply: str) -> str:
     # 移除内部注释标记（可能泄露给用户）
     reply = re.sub(r'<!--.*?-->', '', reply)
 
-    # 过滤过度承诺
-    over_promise = {
-        "保证": "预计",
-        "一定": "会尽力",
-        "肯定到": "预计到达",
-        "绝对不会": "尽量不会",
-        "肯定能": "应该能",
-    }
-    for old, new in over_promise.items():
+    # 过滤过度承诺（按关键词长度降序排列，避免子串冲突）
+    over_promise = [
+        ("绝对不会", "尽量不会"),
+        ("肯定到", "预计到达"),
+        ("肯定能", "应该能"),
+        ("保证", "预计"),
+        ("一定", "会尽力"),
+    ]
+    for old, new in over_promise:
         reply = reply.replace(old, new)
-
-    # 移除内部订单 ID 格式（如 order2026060100003）
-    reply = re.sub(r'(?<!\w)order\d{10,}(?!\w)', '***', reply)
 
     return reply.strip()
 
@@ -87,7 +117,7 @@ def sanitize_output(reply: str) -> str:
 # ============================================================
 
 PII_PATTERNS = {
-    "phone": re.compile(r'1[3-9]\d{9}'),
+    "phone": re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)'),
     "id_card": re.compile(r'\d{17}[\dXx]'),
     "email": re.compile(r'[\w.-]+@[\w.-]+\.\w+'),
 }
